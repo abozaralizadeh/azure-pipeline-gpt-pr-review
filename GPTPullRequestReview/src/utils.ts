@@ -1,19 +1,29 @@
 import * as tl from "azure-pipelines-task-lib/task";
 
-export function getFileExtension(fileName: string) {
-  return fileName.slice((fileName.lastIndexOf(".") - 1 >>> 0) + 2);
+export function getTargetBranchName(): string | null {
+  const targetBranch = tl.getVariable('System.PullRequest.TargetBranch');
+  if (targetBranch) {
+    return targetBranch.replace('refs/heads/', '');
+  }
+  return null;
 }
 
-export function getTargetBranchName() {
-  let targetBranchName = tl.getVariable('System.PullRequest.TargetBranchName');
-
-  if (!targetBranchName) {
-    targetBranchName = tl.getVariable('System.PullRequest.TargetBranch')?.replace('refs/heads/', '');
+export function getSourceBranchName(): string | null {
+  const sourceBranch = tl.getVariable('System.PullRequest.SourceBranch');
+  if (sourceBranch) {
+    return sourceBranch.replace('refs/heads/', '');
   }
+  return null;
+}
 
-  if (!targetBranchName) {
-    return undefined;
-  }
+export function getPullRequestId(): string | null {
+  return tl.getVariable('System.PullRequest.PullRequestId') || null;
+}
 
-  return `origin/${targetBranchName}`;
+export function getRepositoryName(): string | null {
+  return tl.getVariable('Build.Repository.Name') || null;
+}
+
+export function getProjectName(): string | null {
+  return tl.getVariable('System.TeamProject') || null;
 }

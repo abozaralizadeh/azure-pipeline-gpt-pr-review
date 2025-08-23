@@ -3,7 +3,7 @@
     "id": "GPTPullRequestReview",
     "name": "GPT Pull Request Review",
     "version": "0.12.3",
-    "publisher": "mustaphalarhrouch",
+    "publisher": "abozar",
     "galleryFlags": [
         "Public",
         "Preview"
@@ -33,7 +33,7 @@
     ],
     "repository" : {
         "type" : "git",
-        "uri" : "https://github.com/mlarhrouch/azure-pipeline-gpt-pr-review"
+        "uri" : "https://github.com/abozaralizadeh/azure-pipeline-gpt-pr-review"
     },
     "content": {
         "details": {
