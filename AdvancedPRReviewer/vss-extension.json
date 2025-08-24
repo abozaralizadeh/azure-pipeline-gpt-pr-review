@@ -1,0 +1,58 @@
+{
+    "manifestVersion": 1,
+    "id": "AdvancedPRReviewer",
+    "name": "Advanced Azure DevOps PR Reviewer",
+    "version": "2.0.0",
+    "publisher": "abozar",
+    "galleryFlags": [
+        "Public",
+        "Preview"
+    ],
+    "targets": [
+        {
+            "id": "Microsoft.VisualStudio.Services"
+        }
+    ],    
+    "description": "Advanced Pull Request reviewer using Azure OpenAI and LangGraph React agent for precise, intelligent code reviews",
+    "categories": [
+        "Azure Pipelines"
+    ],
+    "icons": {
+        "default": "images/icon.png"        
+    },
+    "tags": [
+        "Azure OpenAI",
+        "LangGraph",
+        "AI",
+        "pullRequest",
+        "code review",
+        "security scanning",
+        "intelligent review"
+    ],
+    "files": [
+        {
+            "path": "AdvancedPRReviewer"
+        }
+    ],
+    "repository" : {
+        "type" : "git",
+        "uri" : "https://github.com/abozaralizadeh/azure-pipeline-gpt-pr-review"
+    },
+    "content": {
+        "details": {
+            "path": "overview.md"
+        }
+    },
+    "contributions": [
+        {
+            "id": "AdvancedPRReviewer",
+            "type": "ms.vss-distributed-task.task",
+            "targets": [
+                "ms.vss-distributed-task.tasks"
+            ],
+            "properties": {
+                "name": "AdvancedPRReviewer"
+            }
+        }
+    ]
+}
