@@ -1,7 +1,7 @@
 {
   "id": "b42fa530-c4a6-11ed-87f6-d1f44a1fead1",
   "name": "AdvancedPRReviewer",
-  "friendlyName": "Advanced PR Reviewer with Azure OpenAI & LangGraph",
+  "friendlyName": "Advanced PR Reviewer",
   "description": "Advanced Pull Request reviewer using Azure OpenAI and LangGraph React agent for precise, intelligent code reviews",
   "author": "Advanced PR Reviewer Team",
   "helpMarkDown": "[More Information](https://github.com/advanced-pr-reviewer)",
@@ -84,7 +84,7 @@
     }
   ],
   "execution": {
-    "Node10": {
+    "Node20": {
       "target": "dist/index.js"
     }
   }

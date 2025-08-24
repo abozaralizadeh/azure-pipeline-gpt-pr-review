@@ -6,7 +6,14 @@
   "scripts": {
     "build": "tsc -p .",
     "dev": "tsc -p . --watch",
-    "test": "jest"
+    "test": "jest",
+    "clean": "rm -r ./dist",
+    "package": "npx tfx-cli extension create",
+    "compile": "webpack --mode production",
+    "clean_build": "npm run clean && npm run compile && npm run package",
+    "deploy": "npx tfx-cli extension publish",
+    "deploy_win_pat": "powershell -Command \"Get-Content .env | ForEach-Object { $name, $value = $_ -split '='; [System.Environment]::SetEnvironmentVariable($name, $value) } ; npx tfx-cli extension publish -t $env:PAT\"",
+    "build_deploy": "npm run build && npm run deploy_win_pat"
   },
   "keywords": [
     "azure-devops",

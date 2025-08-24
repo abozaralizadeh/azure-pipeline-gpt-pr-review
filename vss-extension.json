@@ -1,8 +1,8 @@
 {
     "manifestVersion": 1,
-    "id": "GPTPullRequestReview",
-    "name": "GPT Pull Request Review",
-    "version": "0.12.3",
+    "id": "AdvancedPRReviewer",
+    "name": "Advanced Azure DevOps PR Reviewer",
+    "version": "2.0.0",
     "publisher": "abozar",
     "galleryFlags": [
         "Public",
@@ -13,7 +13,7 @@
             "id": "Microsoft.VisualStudio.Services"
         }
     ],    
-    "description": "A task that review Pull Request using GPT model from OpenAI",
+    "description": "Advanced Pull Request reviewer using Azure OpenAI and LangGraph React agent for precise, intelligent code reviews",
     "categories": [
         "Azure Pipelines"
     ],
@@ -21,14 +21,17 @@
         "default": "images/icon.png"        
     },
     "tags": [
-        "OpenAI",
-        "GPT",
+        "Azure OpenAI",
+        "LangGraph",
+        "AI",
         "pullRequest",
-        "review"
+        "code review",
+        "security scanning",
+        "intelligent review"
     ],
     "files": [
         {
-            "path": "GPTPullRequestReview"
+            "path": "AdvancedPRReviewer"
         }
     ],
     "repository" : {
@@ -42,13 +45,13 @@
     },
     "contributions": [
         {
-            "id": "GPTPullRequestReview",
+            "id": "AdvancedPRReviewer",
             "type": "ms.vss-distributed-task.task",
             "targets": [
                 "ms.vss-distributed-task.tasks"
             ],
             "properties": {
-                "name": "GPTPullRequestReview"
+                "name": "AdvancedPRReviewer"
             }
         }
     ]
