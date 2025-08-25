@@ -85,7 +85,7 @@ This repository has been completely transformed from a basic GPT-powered PR revi
 
 ### New Task Parameters
 ```yaml
-- task: AdvancedPRReviewer@2
+- task: GENAIADVANCEDPRREVIEWER@2
   inputs:
     azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
     azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'
@@ -217,7 +217,7 @@ Found 7 issues that need attention. There are 4 improvement suggestions to enhan
    - task: GPTPullRequestReview@0
    
    # New
-   - task: AdvancedPRReviewer@2
+   - task: GENAIADVANCEDPRREVIEWER@2
    ```
 
 2. **Update Parameters**

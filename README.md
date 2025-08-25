@@ -74,7 +74,7 @@ PR Context → Context Analysis → File Review → Security Scan → Code Sugge
 Add the task to your Azure DevOps pipeline YAML:
 
 ```yaml
-- task: AdvancedPRReviewer@2
+- task: GENAIADVANCEDPRREVIEWER@2
   inputs:
     azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
     azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'

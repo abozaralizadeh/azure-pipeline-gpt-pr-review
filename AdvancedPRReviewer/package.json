@@ -4,13 +4,10 @@
   "description": "Advanced Azure DevOps PR Reviewer using Azure OpenAI and LangGraph React agent",
   "main": "dist/index.js",
   "scripts": {
-    "buildo": "webpack --config webpack.config.js",
     "build:tsc": "tsc -p .",
     "dev": "webpack --config webpack.config.js --watch",
     "clean": "rm -rf dist",
     "create-extension": "node create-extension.js",
-    "packageo": "npm run clean && npm run build && npm run create-extension",
-    "cleano": "rimraf ./dist",
     "test": "echo \"Error: no test specified\" && exit 1",
     "package": "npx tfx-cli extension create",
     "compile": "webpack --mode production",

@@ -1,8 +1,8 @@
 {
     "manifestVersion": 1,
-    "id": "AdvancedPRReviewer",
-    "name": "Advanced Azure DevOps PR Reviewer",
-    "version": "2.0.0",
+    "id": "GenAIAdvancedPRReviewer",
+    "name": "Gen AI Advanced PR Reviewer",
+    "version": "2.2.0",
     "publisher": "abozar",
     "galleryFlags": [
         "Public",
@@ -31,7 +31,7 @@
     ],
     "files": [
         {
-            "path": "AdvancedPRReviewer"
+            "path": "GenAIAdvancedPRReviewer"
         }
     ],
     "repository" : {
@@ -45,13 +45,13 @@
     },
     "contributions": [
         {
-            "id": "AdvancedPRReviewer",
+            "id": "GenAIAdvancedPRReviewer",
             "type": "ms.vss-distributed-task.task",
             "targets": [
                 "ms.vss-distributed-task.tasks"
             ],
             "properties": {
-                "name": "AdvancedPRReviewer"
+                "name": "GenAIAdvancedPRReviewer"
             }
         }
     ]
