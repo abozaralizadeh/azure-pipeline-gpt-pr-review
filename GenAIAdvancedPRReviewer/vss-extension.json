@@ -2,13 +2,13 @@
     "manifestVersion": 1,
     "id": "GenAIAdvancedPRReviewer",
     "name": "Gen AI Advanced PR Reviewer",
-    "version": "2.6.0",
+    "version": "2.7.0",
     "publisher": "abozar",
     "galleryFlags": [
         "Public",
         "Preview"
     ],
-    "targets": [
+    "targets": [ 
         {
             "id": "Microsoft.VisualStudio.Services"
         }
@@ -18,7 +18,7 @@
         "Azure Pipelines"
     ],
     "icons": {
-        "default": "images/icon.png"        
+        "default": "icon.png"        
     },
     "tags": [
         "Azure OpenAI",
@@ -31,7 +31,7 @@
     ],
     "files": [
         {
-            "path": "GenAIAdvancedPRReviewer"
+            "path": ""
         }
     ],
     "repository" : {
