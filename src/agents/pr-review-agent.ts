@@ -1,5 +1,6 @@
 import { z } from "zod";
 import * as tl from "azure-pipelines-task-lib/task";
+import fetch from 'node-fetch';
 
 // Define the state schema for the PR review agent
 export const PRReviewState = z.object({

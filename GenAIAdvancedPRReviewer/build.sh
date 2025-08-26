@@ -35,7 +35,7 @@ echo "🔨 Building TypeScript..."
 npm run build
 
 # Check if build was successful
-if [ -d "dist" ]; then
+if [ -d "GenAIAdvancedPRReviewer/dist" ]; then
     echo "✅ Build completed successfully!"
     echo "📁 Output directory: dist/"
     echo "📊 Build summary:"
