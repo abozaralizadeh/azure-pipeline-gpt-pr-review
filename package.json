@@ -1,6 +1,6 @@
 {
   "name": "advanced-azure-devops-pr-reviewer",
-  "version": "2.17.0",
+  "version": "2.22.0",
   "description": "Advanced Azure DevOps PR Reviewer using Azure OpenAI and LangGraph React agent",
   "main": "dist/index.js",
   "engines": {
@@ -29,14 +29,14 @@
   "author": "Advanced PR Reviewer Team",
   "license": "MIT",
   "dependencies": {
-    "@langchain/community": "^0.2.0",
+    "@langchain/community": "^0.3.53",
     "@langchain/core": "^0.2.0",
     "@langchain/langgraph": "^0.0.20",
     "@langchain/openai": "^0.2.0",
     "azure-pipelines-task-lib": "^4.3.1",
     "binary-extensions": "^2.2.0",
     "dotenv": "^16.3.1",
-    "langchain": "^0.1.0",
+    "langchain": "^0.3.31",
     "node-fetch": "^2.6.6",
     "openai": "^4.28.0",
     "simple-git": "^3.17.0",
