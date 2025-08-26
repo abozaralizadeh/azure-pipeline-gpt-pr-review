@@ -2,9 +2,6 @@
   "execution": {
     "Node20": {
       "target": "index.js"
-    },
-    "PowerShell3": {
-      "target": "index.ps1"
     }
   }
 }

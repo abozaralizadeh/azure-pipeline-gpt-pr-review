@@ -2,13 +2,13 @@
     "manifestVersion": 1,
     "id": "GenAIAdvancedPRReviewer",
     "name": "Gen AI Advanced PR Reviewer",
-    "version": "2.4.0",
+    "version": "2.6.0",
     "publisher": "abozar",
     "galleryFlags": [
         "Public",
         "Preview"
     ],
-    "targets": [
+    "targets": [ 
         {
             "id": "Microsoft.VisualStudio.Services"
         }
