@@ -85,10 +85,10 @@
   ],
   "execution": {
     "Node16": {
-      "target": "index.js"
+      "target": "../dist/index.js"
     },
     "Node20": {
-      "target": "index.js"
+      "target": "../dist/index.js"
     },
     "PowerShell3": {
       "target": "index.ps1"

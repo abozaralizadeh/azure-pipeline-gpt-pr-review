@@ -31,7 +31,8 @@
     ],
     "files": [
         {
-            "path": ""
+            "path": "GenAIAdvancedPRReviewer",
+            "addressable": true
         }
     ],
     "repository" : {
@@ -40,7 +41,7 @@
     },
     "content": {
         "details": {
-            "path": "overview.md"
+            "path": "GenAIAdvancedPRReviewer/overview.md"
         }
     },
     "contributions": [
