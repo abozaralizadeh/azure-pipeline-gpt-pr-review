@@ -58,22 +58,27 @@ export class ReviewOrchestrator {
         throw new Error("This task should only run when triggered from a Pull Request.");
       }
 
-      // Step 2: Get PR details and context
+      // Step 2: Test API connectivity first
+      await this.azureDevOpsService.testCorrectedUrlStructure();
+      await this.azureDevOpsService.testBaseUrlConnectivity();
+      await this.azureDevOpsService.testApiConnectivity();
+      
+      // Step 3: Get PR details and context
       const prDetails = await this.azureDevOpsService.getPullRequestDetails();
       console.log(`📋 Reviewing PR: ${prDetails.title}`);
       console.log(`👤 Author: ${prDetails.createdBy.displayName}`);
       console.log(`🔄 Source: ${prDetails.sourceRefName} → Target: ${prDetails.targetRefName}`);
 
-      // Step 3: Get target branch
+      // Step 4: Get target branch
       const targetBranch = getTargetBranchName();
       if (!targetBranch) {
         throw new Error("No target branch found!");
       }
 
-      // Step 4: Clean up existing comments
+      // Step 5: Clean up existing comments
       await this.azureDevOpsService.deleteExistingComments();
 
-      // Step 5: Get changed files
+      // Step 6: Get changed files
       const changedFiles = await this.azureDevOpsService.getChangedFiles();
       console.log(`📁 Found ${changedFiles.length} changed files`);
 
@@ -82,16 +87,16 @@ export class ReviewOrchestrator {
         return this.createEmptyReviewResult();
       }
 
-      // Step 6: Review each file
+      // Step 7: Review each file
       const reviewResults = await this.reviewFiles(changedFiles, targetBranch, prDetails);
 
-      // Step 7: Generate final summary
+      // Step 8: Generate final summary
       const finalSummary = await this.generateFinalSummary(reviewResults, prDetails);
 
-      // Step 8: Post results to Azure DevOps
+      // Step 9: Post results to Azure DevOps
       await this.postReviewResults(reviewResults, finalSummary);
 
-      // Step 9: Return comprehensive result
+      // Step 10: Return comprehensive result
       return this.createReviewResult(reviewResults, finalSummary);
 
     } catch (error: any) {
