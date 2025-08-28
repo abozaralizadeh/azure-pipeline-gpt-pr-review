@@ -2,7 +2,7 @@
     "manifestVersion": 1,
     "id": "GenAIAdvancedPRReviewer",
     "name": "Gen AI Advanced PR Reviewer",
-    "version": "2.22.0",
+    "version": "2.23.0",
     "publisher": "abozar",
     "galleryFlags": [
         "Public",
