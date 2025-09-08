@@ -223,11 +223,17 @@ Respond with JSON:
       return state;
     }
 
+    // Parse the diff to extract line numbers and changes
+    const diffAnalysis = this.analyzeDiff(state.file_diff || '');
+    
     const reviewPrompt = `You are an expert code reviewer. Analyze the following file changes and provide detailed feedback.
 
 File: ${state.current_file}
 File Content: ${state.file_content}
 File Diff: ${state.file_diff}
+
+IMPORTANT: When providing line numbers, use the line numbers from the MODIFIED file (right side of diff). 
+The diff shows changes with + for additions and - for deletions. Focus on the actual line numbers in the modified file.
 
 Review the code for:
 1. Correctness and logic errors
@@ -237,6 +243,8 @@ Review the code for:
 5. Adherence to coding standards
 6. Test coverage needs
 
+For each issue, provide the EXACT line number from the modified file where the issue occurs.
+
 Use the following JSON schema for your response:
 {
   "issues": [
@@ -244,9 +252,10 @@ Use the following JSON schema for your response:
       "type": "bug" | "improvement" | "security" | "style" | "test",
       "severity": "low" | "medium" | "high" | "critical",
       "description": "Detailed description of the issue",
-      "line_number": number (if applicable),
+      "line_number": number (EXACT line number from modified file),
       "suggestion": "Specific suggestion for improvement",
-      "confidence": number (0.0-1.0)
+      "confidence": number (0.0-1.0),
+      "code_snippet": "The actual code line that has the issue"
     }
   ],
   "overall_quality": "excellent" | "good" | "acceptable" | "needs_improvement" | "poor",
@@ -261,13 +270,16 @@ Use the following JSON schema for your response:
         summary: "Review completed with fallback parsing"
       });
       
-      // Add review comments to state
+      // Add review comments to state with improved line number detection
       if (review.issues && Array.isArray(review.issues)) {
         review.issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
+            // Try to find the best line number for this issue
+            const bestLineNumber = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
+            
             state.review_comments.push({
               file: state.current_file || "unknown",
-              line: issue.line_number,
+              line: bestLineNumber,
               comment: issue.description,
               type: issue.type,
               confidence: issue.confidence,
@@ -285,6 +297,66 @@ Use the following JSON schema for your response:
     }
   }
 
+  private analyzeDiff(diff: string): { addedLines: number[]; removedLines: number[]; modifiedLines: number[] } {
+    const addedLines: number[] = [];
+    const removedLines: number[] = [];
+    const modifiedLines: number[] = [];
+    
+    if (!diff) {
+      return { addedLines, removedLines, modifiedLines };
+    }
+
+    const lines = diff.split('\n');
+    let currentLine = 0;
+
+    for (const line of lines) {
+      if (line.startsWith('@@')) {
+        // Parse hunk header to get starting line numbers
+        const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+        if (match) {
+          currentLine = parseInt(match[3]) - 1; // Start of modified lines
+        }
+      } else if (line.startsWith('+')) {
+        // Added line
+        currentLine++;
+        addedLines.push(currentLine);
+      } else if (line.startsWith('-')) {
+        // Removed line - don't increment current line
+        // removedLines.push(currentLine);
+      } else if (line.startsWith(' ')) {
+        // Context line
+        currentLine++;
+      }
+    }
+
+    return { addedLines, removedLines, modifiedLines };
+  }
+
+  private findBestLineNumber(issue: any, diffAnalysis: any, fileContent: string): number {
+    // If the issue already has a line number, use it
+    if (issue.line_number && issue.line_number > 0) {
+      return issue.line_number;
+    }
+
+    // Try to find the line by searching for the code snippet
+    if (issue.code_snippet) {
+      const lines = fileContent.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(issue.code_snippet.trim())) {
+          return i + 1; // Convert to 1-based line number
+        }
+      }
+    }
+
+    // If we have added lines, use the first one as a fallback
+    if (diffAnalysis.addedLines.length > 0) {
+      return diffAnalysis.addedLines[0];
+    }
+
+    // Default fallback
+    return 1;
+  }
+
   private async securityScan(state: PRReviewStateType): Promise<PRReviewStateType> {
     if (this.llmCalls >= this.maxLLMCalls) {
       return state;
@@ -294,10 +366,17 @@ Use the following JSON schema for your response:
       return state;
     }
 
+    // Parse the diff to extract line numbers and changes
+    const diffAnalysis = this.analyzeDiff(state.file_diff || '');
+
     const securityPrompt = `Perform a security analysis of the following code:
 
 File: ${state.current_file}
 Code: ${state.file_content}
+File Diff: ${state.file_diff}
+
+IMPORTANT: When providing line numbers, use the line numbers from the MODIFIED file (right side of diff). 
+Focus on the actual line numbers in the modified file where security issues occur.
 
 Look for security vulnerabilities including:
 1. SQL injection
@@ -308,6 +387,10 @@ Look for security vulnerabilities including:
 6. Authorization bypasses
 7. Insecure dependencies
 8. Logging of sensitive information
+9. Prompt injection vulnerabilities
+10. Input sanitization issues
+
+For each security issue, provide the EXACT line number from the modified file where the vulnerability occurs.
 
 Respond with JSON:
 {
@@ -316,9 +399,10 @@ Respond with JSON:
       "vulnerability_type": string,
       "severity": "low" | "medium" | "high" | "critical",
       "description": string,
-      "line_number": number,
+      "line_number": number (EXACT line number from modified file),
       "recommendation": string,
-      "confidence": number
+      "confidence": number,
+      "code_snippet": "The actual code line that has the security issue"
     }
   ],
   "overall_security_score": "A" | "B" | "C" | "D" | "F"
@@ -334,9 +418,12 @@ Respond with JSON:
       if (securityAnalysis.security_issues && Array.isArray(securityAnalysis.security_issues)) {
         securityAnalysis.security_issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
+            // Try to find the best line number for this security issue
+            const bestLineNumber = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
+            
             state.review_comments.push({
               file: state.current_file || "unknown",
-              line: issue.line_number,
+              line: bestLineNumber,
               comment: `SECURITY: ${issue.description}`,
               type: "security",
               confidence: issue.confidence,

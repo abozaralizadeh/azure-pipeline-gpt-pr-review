@@ -148,18 +148,31 @@ export class ReviewOrchestrator {
           continue;
         }
 
-        // Get file content and diff
+        // Get file content and diff with line numbers
         const fileContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
         let fileDiff = '';
+        let lineMapping = new Map();
         
         try {
-          fileDiff = await this.azureDevOpsService.getFileDiff(filePath, targetBranch, prDetails.sourceRefName);
-          console.log(`✅ Got file diff for ${filePath}`);
+          // Try to get diff with line numbers first
+          const diffResult = await this.azureDevOpsService.getFileDiffWithLineNumbers(filePath, targetBranch, prDetails.sourceRefName);
+          fileDiff = diffResult.diff;
+          lineMapping = diffResult.lineMapping;
+          console.log(`✅ Got file diff with line mapping for ${filePath}`);
         } catch (diffError) {
           const errorMessage = diffError instanceof Error ? diffError.message : String(diffError);
-          console.log(`⚠️ Failed to get diff for ${filePath}:`, errorMessage);
-          console.log(`🔄 Proceeding with review using file content only`);
-          fileDiff = `File ${filePath} has changes (diff unavailable)`;
+          console.log(`⚠️ Failed to get diff with line numbers for ${filePath}:`, errorMessage);
+          
+          // Fallback to regular diff
+          try {
+            fileDiff = await this.azureDevOpsService.getFileDiff(filePath, targetBranch, prDetails.sourceRefName);
+            console.log(`✅ Got regular file diff for ${filePath}`);
+          } catch (regularDiffError) {
+            const regularErrorMessage = regularDiffError instanceof Error ? regularDiffError.message : String(regularDiffError);
+            console.log(`⚠️ Failed to get regular diff for ${filePath}:`, regularErrorMessage);
+            console.log(`🔄 Proceeding with review using file content only`);
+            fileDiff = `File ${filePath} has changes (diff unavailable)`;
+          }
         }
 
         if (fileContent.isBinary) {
@@ -256,7 +269,7 @@ export class ReviewOrchestrator {
     const summaryComment = this.formatSummaryComment(finalSummary);
     await this.azureDevOpsService.addGeneralComment(summaryComment);
 
-    // Post individual file comments
+    // Post individual file comments with improved inline commenting
     for (const result of reviewResults) {
       for (const comment of result.review_comments) {
         if (comment.file === 'PR_CONTEXT' || comment.file === 'FINAL_ASSESSMENT') {
@@ -265,22 +278,44 @@ export class ReviewOrchestrator {
 
         try {
           if (comment.line && comment.line > 0) {
-            // Post as inline comment
+            // Post as inline comment with enhanced formatting
+            const formattedComment = this.formatInlineComment(comment);
             await this.azureDevOpsService.addInlineComment(
               comment.file,
-              this.formatComment(comment),
-              comment.line
+              formattedComment,
+              comment.line,
+              true // Always use right side (modified file)
             );
+            console.log(`✅ Posted inline comment for ${comment.file} at line ${comment.line}`);
           } else {
             // Post as general comment for the file
             const fileComment = `**File: ${comment.file}**\n\n${this.formatComment(comment)}`;
             await this.azureDevOpsService.addGeneralComment(fileComment);
+            console.log(`✅ Posted general comment for ${comment.file}`);
           }
         } catch (error: any) {
           console.error(`❌ Error posting comment for ${comment.file}:`, error.message);
+          // Fallback: try to post as general comment
+          try {
+            const fallbackComment = `**File: ${comment.file}**\n\n${this.formatComment(comment)}`;
+            await this.azureDevOpsService.addGeneralComment(fallbackComment);
+            console.log(`✅ Posted fallback general comment for ${comment.file}`);
+          } catch (fallbackError: any) {
+            console.error(`❌ Fallback comment also failed for ${comment.file}:`, fallbackError.message);
+          }
         }
       }
     }
+  }
+
+  private formatInlineComment(comment: any): string {
+    let formattedComment = `**${comment.type.toUpperCase()}** (Confidence: ${Math.round(comment.confidence * 100)}%)\n\n${comment.comment}`;
+    
+    if (comment.suggestion) {
+      formattedComment += `\n\n💡 **Suggestion:**\n${comment.suggestion}`;
+    }
+
+    return formattedComment;
   }
 
   private formatComment(comment: any): string {

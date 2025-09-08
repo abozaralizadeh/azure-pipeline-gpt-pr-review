@@ -13,10 +13,10 @@ export interface PRComment {
   };
   threadContext?: {
     filePath?: string;
-    leftFileStart?: number;
-    leftFileEnd?: number;
-    rightFileStart?: number;
-    rightFileEnd?: number;
+    leftFileStart?: number | { line: number; offset: number };
+    leftFileEnd?: number | { line: number; offset: number };
+    rightFileStart?: number | { line: number; offset: number };
+    rightFileEnd?: number | { line: number; offset: number };
   };
 }
 
@@ -700,6 +700,123 @@ export class AzureDevOpsService {
     }
   }
 
+  public async getFileDiffWithLineNumbers(filePath: string, targetBranch: string, sourceBranch: string): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }> }> {
+    console.log(`🔍 Getting file diff with line numbers for: ${filePath}`);
+    
+    try {
+      // Clean up the file path
+      const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+      
+      // Get the raw diff content
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
+      
+      const response = await fetch(diffUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        agent: this.httpsAgent
+      });
+
+      if (response.ok) {
+        const diffData = await response.json();
+        
+        // Look for the specific file in the diff
+        const fileChange = diffData.changes?.find((change: any) => {
+          const changePath = change.item?.path || '';
+          const cleanChangePath = changePath.startsWith('/') ? changePath.substring(1) : changePath;
+          return cleanChangePath === cleanPath;
+        });
+
+        if (fileChange && fileChange.item) {
+          // Get the actual diff content for this file
+          const fileDiffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&versionDescriptor.version=${sourceBranch}&api-version=7.0&includeContent=true&$format=text`;
+          
+          const fileResponse = await fetch(fileDiffUrl, {
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Content-Type': 'text/plain'
+            },
+            agent: this.httpsAgent
+          });
+
+          if (fileResponse.ok) {
+            const fileContent = await fileResponse.text();
+            const lineMapping = this.parseDiffLineNumbers(fileContent);
+            
+            return {
+              diff: fileContent,
+              lineMapping: lineMapping
+            };
+          }
+        }
+      }
+      
+      // Fallback: return empty diff
+      return { diff: '', lineMapping: new Map() };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(`⚠️ Failed to get diff with line numbers:`, errorMessage);
+      return { diff: '', lineMapping: new Map() };
+    }
+  }
+
+  private parseDiffLineNumbers(diffContent: string): Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }> {
+    const lineMapping = new Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>();
+    
+    if (!diffContent) {
+      return lineMapping;
+    }
+
+    const lines = diffContent.split('\n');
+    let originalLine = 0;
+    let modifiedLine = 0;
+    let diffLine = 0;
+
+    for (const line of lines) {
+      diffLine++;
+      
+      if (line.startsWith('@@')) {
+        // Parse hunk header: @@ -start,count +start,count @@
+        const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+        if (match) {
+          originalLine = parseInt(match[1]) - 1; // Convert to 0-based
+          modifiedLine = parseInt(match[3]) - 1; // Convert to 0-based
+        }
+      } else if (line.startsWith('+')) {
+        // Added line
+        modifiedLine++;
+        lineMapping.set(diffLine, {
+          originalLine: originalLine,
+          modifiedLine: modifiedLine,
+          isAdded: true,
+          isRemoved: false
+        });
+      } else if (line.startsWith('-')) {
+        // Removed line
+        originalLine++;
+        lineMapping.set(diffLine, {
+          originalLine: originalLine,
+          modifiedLine: modifiedLine,
+          isAdded: false,
+          isRemoved: true
+        });
+      } else if (line.startsWith(' ')) {
+        // Context line
+        originalLine++;
+        modifiedLine++;
+        lineMapping.set(diffLine, {
+          originalLine: originalLine,
+          modifiedLine: modifiedLine,
+          isAdded: false,
+          isRemoved: false
+        });
+      }
+    }
+
+    return lineMapping;
+  }
+
   private async getFileDiffAlternative(filePath: string, targetBranch: string, sourceBranch: string): Promise<string> {
     try {
       // Try to get the file content from both branches and compare
@@ -759,12 +876,38 @@ export class AzureDevOpsService {
     lineNumber: number,
     isRightSide: boolean = true
   ): Promise<void> {
+    console.log(`💬 Adding inline comment to ${filePath} at line ${lineNumber} (${isRightSide ? 'right' : 'left'} side)`);
+    
     const threadContext = {
       filePath: filePath,
-      rightFileStart: isRightSide ? lineNumber : undefined,
-      rightFileEnd: isRightSide ? lineNumber : undefined,
-      leftFileStart: !isRightSide ? lineNumber : undefined,
-      leftFileEnd: !isRightSide ? lineNumber : undefined
+      rightFileStart: isRightSide ? { line: lineNumber, offset: 1 } : undefined,
+      rightFileEnd: isRightSide ? { line: lineNumber, offset: 1 } : undefined,
+      leftFileStart: !isRightSide ? { line: lineNumber, offset: 1 } : undefined,
+      leftFileEnd: !isRightSide ? { line: lineNumber, offset: 1 } : undefined
+    };
+
+    await this.addComment({
+      content: comment,
+      commentType: 1,
+      threadContext: threadContext
+    });
+  }
+
+  public async addInlineCommentWithRange(
+    filePath: string,
+    comment: string,
+    startLine: number,
+    endLine: number,
+    isRightSide: boolean = true
+  ): Promise<void> {
+    console.log(`💬 Adding inline comment to ${filePath} at lines ${startLine}-${endLine} (${isRightSide ? 'right' : 'left'} side)`);
+    
+    const threadContext = {
+      filePath: filePath,
+      rightFileStart: isRightSide ? { line: startLine, offset: 1 } : undefined,
+      rightFileEnd: isRightSide ? { line: endLine, offset: 1 } : undefined,
+      leftFileStart: !isRightSide ? { line: startLine, offset: 1 } : undefined,
+      leftFileEnd: !isRightSide ? { line: endLine, offset: 1 } : undefined
     };
 
     await this.addComment({
