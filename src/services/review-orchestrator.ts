@@ -149,6 +149,13 @@ export class ReviewOrchestrator {
           continue;
         }
 
+        // Validate that the file actually exists in the current PR
+        const fileExists = await this.azureDevOpsService.validateFileExists(filePath);
+        if (!fileExists) {
+          console.log(`⏭️  Skipping file that doesn't exist in current PR: ${filePath}`);
+          continue;
+        }
+
         // Get file content and diff with line numbers
         const fileContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
         let fileDiff = '';

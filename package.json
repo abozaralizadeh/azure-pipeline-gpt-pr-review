@@ -1,6 +1,6 @@
 {
   "name": "advanced-azure-devops-pr-reviewer",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "description": "Advanced Azure DevOps PR Reviewer using Azure OpenAI and LangGraph React agent",
   "main": "dist/index.js",
   "engines": {

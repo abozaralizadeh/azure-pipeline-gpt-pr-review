@@ -226,6 +226,42 @@ export class AzureDevOpsService {
       }
     }
     
+    // Try to get changes using the PR Changes API first
+    try {
+      console.log(`🔄 Trying PR Changes API...`);
+      const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}/changes?api-version=7.0`;
+      console.log(`🔍 Changes URL: ${changesUrl}`);
+      
+      const response = await fetch(changesUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        agent: this.httpsAgent
+      });
+
+      if (response.ok) {
+        const changesData = await response.json();
+        console.log(`✅ PR Changes API working - Found ${changesData.value?.length || 0} changes`);
+        
+        if (changesData.value && Array.isArray(changesData.value)) {
+          const filePaths = changesData.value
+            .filter((change: any) => change.item && change.item.changeType !== 'delete')
+            .map((change: any) => change.item.path);
+          
+          if (filePaths.length > 0) {
+            console.log(`✅ Successfully extracted ${filePaths.length} changed files from PR Changes API`);
+            return filePaths;
+          }
+        }
+      } else {
+        console.log(`⚠️ PR Changes API failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (changesError) {
+      const errorMessage = changesError instanceof Error ? changesError.message : String(changesError);
+      console.error(`❌ Failed to get changes from PR Changes API:`, errorMessage);
+    }
+    
     // Since the PR Details API is working, let's try to get changes from there first
     try {
       console.log(`🔄 Trying PR Details API...`);
@@ -625,6 +661,17 @@ export class AzureDevOpsService {
       
       console.log(`🔍 PR Context: "${title}" (${sourceBranch} → ${targetBranch})`);
       
+      // Try to get actual changed files using branch diff
+      console.log(`🔄 Trying to get actual changed files using branch diff...`);
+      const branchDiffFiles = await this.getBranchBasedFallbackFiles();
+      if (branchDiffFiles.length > 0) {
+        console.log(`✅ Found ${branchDiffFiles.length} files from branch diff`);
+        return branchDiffFiles;
+      }
+      
+      // If branch diff fails, try to infer from PR title
+      console.log(`🔄 Branch diff failed, trying to infer from PR title...`);
+      
       // Based on the PR title and context, determine the likely changed files
       if (title.includes('pr-review-agent') || title.includes('pr-review-agent.ts')) {
         console.log(`✅ Hardcoded fallback: Detected pr-review-agent.ts changes`);
@@ -651,23 +698,17 @@ export class AzureDevOpsService {
         ];
       }
       
-      // Ultimate fallback: return the main files that are likely to have changes
-      console.log(`✅ Hardcoded fallback: Using ultimate fallback with main files`);
-      return [
-        'AdvancedPRReviewer/src/agents/pr-review-agent.ts',
-        'AdvancedPRReviewer/src/services/azure-devops-service.ts',
-        'AdvancedPRReviewer/src/services/review-orchestrator.ts',
-        'AdvancedPRReviewer/package.json',
-        'AdvancedPRReviewer/vss-extension.json'
-      ];
+      // Ultimate fallback: return empty array to avoid reviewing non-existent files
+      console.log(`⚠️ No files could be determined for review`);
+      return [];
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.log(`⚠️ Hardcoded fallback failed:`, errorMessage);
       
-      // Even if everything fails, return a basic set of files
-      console.log(`✅ Ultimate fallback: Returning basic file set`);
-      return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+      // Even if everything fails, return empty array to avoid reviewing non-existent files
+      console.log(`⚠️ Ultimate fallback: No files to review`);
+      return [];
     }
   }
 
@@ -733,6 +774,37 @@ export class AzureDevOpsService {
       
       // Ultimate fallback
       return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+    }
+  }
+
+  public async validateFileExists(filePath: string): Promise<boolean> {
+    console.log(`🔍 Validating file exists: ${filePath}`);
+    
+    try {
+      // Clean up the file path
+      const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+      
+      // Try to get file info without content
+      const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&api-version=7.0`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        agent: this.httpsAgent
+      });
+
+      if (response.ok) {
+        console.log(`✅ File exists: ${cleanPath}`);
+        return true;
+      } else {
+        console.log(`❌ File does not exist: ${cleanPath} (${response.status})`);
+        return false;
+      }
+    } catch (error) {
+      console.log(`❌ Error validating file ${filePath}:`, error);
+      return false;
     }
   }
 
