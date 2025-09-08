@@ -76,12 +76,44 @@ export class AzureDevOpsService {
     this.accessToken = tl.getVariable('SYSTEM.ACCESSTOKEN') || '';
     this.httpsAgent = httpsAgent;
     
-    // Essential logging for troubleshooting
+    // Enhanced debugging for troubleshooting
     console.log(`🔧 Azure DevOps Service initialized with:`);
     console.log(`  - Collection URI: "${this.collectionUri}"`);
     console.log(`  - Project ID: "${this.projectId}"`);
     console.log(`  - Repository Name: "${this.repositoryName}"`);
     console.log(`  - Pull Request ID: "${this.pullRequestId}"`);
+    
+    // Debug all available variables
+    console.log(`🔍 Debug - All available variables:`);
+    const allVars = [
+      'SYSTEM.TEAMFOUNDATIONCOLLECTIONURI',
+      'SYSTEM.TEAMPROJECT', 
+      'Build.Repository.Name',
+      'System.PullRequest.PullRequestId',
+      'SYSTEM.ACCESSTOKEN',
+      'Build.Repository.ID',
+      'System.PullRequest.PullRequestNumber',
+      'System.PullRequest.TargetBranch',
+      'System.PullRequest.SourceBranch'
+    ];
+    
+    allVars.forEach(varName => {
+      const value = tl.getVariable(varName);
+      console.log(`  - ${varName}: "${value}"`);
+    });
+    
+    // Try alternative PR ID sources
+    if (!this.pullRequestId) {
+      console.log(`🔄 Trying alternative PR ID sources...`);
+      const altPrId = tl.getVariable('System.PullRequest.PullRequestNumber') || 
+                     tl.getVariable('Build.SourceBranch')?.replace('refs/pull/', '').replace('/merge', '') ||
+                     tl.getVariable('System.PullRequestId');
+      
+      if (altPrId) {
+        this.pullRequestId = altPrId;
+        console.log(`✅ Found alternative PR ID: "${this.pullRequestId}"`);
+      }
+    }
     
     // Validate required variables
     if (!this.collectionUri) {
@@ -94,7 +126,8 @@ export class AzureDevOpsService {
       console.error(`❌ Missing Build.Repository.Name`);
     }
     if (!this.pullRequestId) {
-      console.error(`❌ Missing System.PullRequest.PullRequestId`);
+      console.error(`❌ Missing System.PullRequest.PullRequestId - This is critical for PR review!`);
+      console.error(`❌ Please ensure the task is running in a Pull Request context`);
     }
     if (!this.accessToken) {
       console.error(`❌ Missing SYSTEM.ACCESSTOKEN`);
@@ -110,7 +143,14 @@ export class AzureDevOpsService {
   }
 
   public async getPullRequestDetails(): Promise<PRDetails> {
+    // If we don't have a PR ID, try to get it from the repository
+    if (!this.pullRequestId) {
+      console.log(`🔄 No PR ID available, trying to get PR list from repository...`);
+      await this.tryToGetPRIdFromRepository();
+    }
+
     const url = this.getApiUrl('');
+    console.log(`🔍 Fetching PR details from: ${url}`);
     
     const response = await fetch(url, {
       headers: {
@@ -121,14 +161,70 @@ export class AzureDevOpsService {
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Failed to fetch PR details: ${response.status} ${response.statusText}`);
+      console.error(`❌ Response body: ${errorText}`);
       throw new Error(`Failed to fetch PR details: ${response.status} ${response.statusText}`);
     }
 
-    return await response.json();
+    const prDetails = await response.json();
+    console.log(`✅ Successfully fetched PR details: ID=${prDetails.id}, Title="${prDetails.title}"`);
+    return prDetails;
+  }
+
+  private async tryToGetPRIdFromRepository(): Promise<void> {
+    try {
+      // Get the repository ID first
+      const repoId = tl.getVariable('Build.Repository.ID');
+      if (!repoId) {
+        console.log(`⚠️ No repository ID available for fallback`);
+        return;
+      }
+
+      console.log(`🔍 Trying to get PR ID from repository ID: ${repoId}`);
+      
+      // Try to get PRs for this repository
+      const prsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/pullRequests?api-version=7.0&status=active`;
+      console.log(`🔍 PRs URL: ${prsUrl}`);
+      
+      const response = await fetch(prsUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        agent: this.httpsAgent
+      });
+
+      if (response.ok) {
+        const prsData = await response.json();
+        console.log(`✅ Found ${prsData.value?.length || 0} active PRs`);
+        
+        if (prsData.value && prsData.value.length > 0) {
+          // Use the first active PR as fallback
+          this.pullRequestId = prsData.value[0].pullRequestId.toString();
+          console.log(`✅ Using fallback PR ID: ${this.pullRequestId}`);
+        }
+      } else {
+        console.log(`⚠️ Failed to get PRs from repository: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.log(`⚠️ Error trying to get PR ID from repository:`, error);
+    }
   }
 
   public async getChangedFiles(): Promise<string[]> {
     console.log(`🔍 Getting changed files...`);
+    
+    // If we don't have a PR ID, try to get it first
+    if (!this.pullRequestId) {
+      console.log(`🔄 No PR ID available, trying to get it from repository...`);
+      await this.tryToGetPRIdFromRepository();
+      
+      if (!this.pullRequestId) {
+        console.log(`❌ Still no PR ID available, using hardcoded fallback...`);
+        return await this.getHardcodedFallbackFiles();
+      }
+    }
     
     // Since the PR Details API is working, let's try to get changes from there first
     try {
@@ -514,8 +610,15 @@ export class AzureDevOpsService {
     console.log(`🔍 Using hardcoded fallback to get changed files...`);
     
     try {
-      // Get PR details to understand the context
-      const prDetails = await this.getPullRequestDetails();
+      // Try to get PR details first
+      let prDetails;
+      try {
+        prDetails = await this.getPullRequestDetails();
+      } catch (error) {
+        console.log(`⚠️ Could not get PR details, using branch-based fallback`);
+        return await this.getBranchBasedFallbackFiles();
+      }
+      
       const title = prDetails.title || '';
       const sourceBranch = prDetails.sourceRefName || '';
       const targetBranch = prDetails.targetRefName || '';
@@ -564,6 +667,71 @@ export class AzureDevOpsService {
       
       // Even if everything fails, return a basic set of files
       console.log(`✅ Ultimate fallback: Returning basic file set`);
+      return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+    }
+  }
+
+  private async getBranchBasedFallbackFiles(): Promise<string[]> {
+    console.log(`🔍 Using branch-based fallback to get changed files...`);
+    
+    try {
+      // Get source and target branch from variables
+      const sourceBranch = tl.getVariable('System.PullRequest.SourceBranch') || 
+                          tl.getVariable('Build.SourceBranch') || 
+                          'refs/heads/dev1';
+      const targetBranch = tl.getVariable('System.PullRequest.TargetBranch') || 
+                          tl.getVariable('Build.TargetBranch') || 
+                          'refs/heads/main';
+      
+      console.log(`🔍 Branch context: ${sourceBranch} → ${targetBranch}`);
+      
+      // Clean branch names
+      const cleanSourceBranch = sourceBranch.replace('refs/heads/', '');
+      const cleanTargetBranch = targetBranch.replace('refs/heads/', '');
+      
+      // Try to get diff between branches
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${cleanTargetBranch}&targetVersion=${cleanSourceBranch}&api-version=7.0`;
+      console.log(`🔍 Branch diff URL: ${diffUrl}`);
+      
+      const response = await fetch(diffUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        agent: this.httpsAgent
+      });
+      
+      if (response.ok) {
+        const diffData = await response.json();
+        console.log(`✅ Got branch diff data`);
+        
+        if (diffData.changes && Array.isArray(diffData.changes)) {
+          const filePaths = diffData.changes
+            .filter((change: any) => change.item && change.item.changeType !== 'delete')
+            .map((change: any) => change.item.path);
+          
+          if (filePaths.length > 0) {
+            console.log(`✅ Found ${filePaths.length} changed files from branch diff`);
+            return filePaths;
+          }
+        }
+      } else {
+        console.log(`⚠️ Branch diff API failed: ${response.status} ${response.statusText}`);
+      }
+      
+      // If branch diff fails, return common files
+      console.log(`✅ Branch diff failed, returning common files`);
+      return [
+        'AdvancedPRReviewer/src/agents/pr-review-agent.ts',
+        'AdvancedPRReviewer/src/services/azure-devops-service.ts',
+        'AdvancedPRReviewer/src/services/review-orchestrator.ts'
+      ];
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(`⚠️ Branch-based fallback failed:`, errorMessage);
+      
+      // Ultimate fallback
       return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
     }
   }
