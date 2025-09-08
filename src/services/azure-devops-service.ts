@@ -304,6 +304,19 @@ export class AzureDevOpsService {
       const errorMessage = gitDiffError instanceof Error ? gitDiffError.message : String(gitDiffError);
       console.error(`❌ Git diff fallback also failed:`, errorMessage);
     }
+
+    // Try to get files from the actual PR using repository ID
+    try {
+      console.log(`🔄 Trying to get files from actual PR using repository ID...`);
+      const actualFiles = await this.getFilesFromActualPR();
+      if (actualFiles.length > 0) {
+        console.log(`✅ Found ${actualFiles.length} files from actual PR`);
+        return actualFiles;
+      }
+    } catch (actualFilesError) {
+      const errorMessage = actualFilesError instanceof Error ? actualFilesError.message : String(actualFilesError);
+      console.error(`❌ Failed to get files from actual PR:`, errorMessage);
+    }
     
     // Try Git commits API as another fallback
     try {
@@ -386,11 +399,9 @@ export class AzureDevOpsService {
       console.error(`❌ Hardcoded fallback also failed:`, errorMessage);
     }
     
-    // If even the hardcoded fallback fails, return a minimal set to ensure the review can proceed
-    console.log(`🔄 All fallbacks failed, returning minimal file set to ensure review can proceed...`);
-    const fallbackFiles = ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
-    console.log(`✅ Ultimate fallback: Returning ${fallbackFiles.length} files:`, fallbackFiles);
-    return fallbackFiles;
+    // If all approaches fail, return empty array to avoid reviewing non-existent files
+    console.log(`⚠️ All file detection approaches failed, returning empty array to avoid reviewing non-existent files`);
+    return [];
   }
 
   public async getChangedFilesUsingGitDiff(): Promise<string[]> {
@@ -588,7 +599,7 @@ export class AzureDevOpsService {
       console.log(`🔄 No specific files found in commits, trying alternative approach...`);
       
       // Since we know the PR is about pr-review-agent.ts, let's return that
-      return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+      return ['/AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -625,13 +636,13 @@ export class AzureDevOpsService {
       // Look for file references in the PR title or description
       if (title.includes('pr-review-agent.ts') || description.includes('pr-review-agent.ts')) {
         console.log(`✅ Inferred changed file from PR title/description: pr-review-agent.ts`);
-        return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+        return ['/AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
       }
       
       // If still no files found, return a default based on the PR title
       if (title.includes('pr-review-agent')) {
         console.log(`✅ Inferred changed file from PR title: pr-review-agent.ts`);
-        return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+        return ['/AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
       }
       
     } catch (error) {
@@ -675,7 +686,7 @@ export class AzureDevOpsService {
       // Based on the PR title and context, determine the likely changed files
       if (title.includes('pr-review-agent') || title.includes('pr-review-agent.ts')) {
         console.log(`✅ Hardcoded fallback: Detected pr-review-agent.ts changes`);
-        return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+        return ['/AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
       }
       
       if (title.includes('azure-devops-service') || title.includes('azure-devops-service.ts')) {
@@ -760,20 +771,160 @@ export class AzureDevOpsService {
         console.log(`⚠️ Branch diff API failed: ${response.status} ${response.statusText}`);
       }
       
-      // If branch diff fails, return common files
-      console.log(`✅ Branch diff failed, returning common files`);
-      return [
-        'AdvancedPRReviewer/src/agents/pr-review-agent.ts',
-        'AdvancedPRReviewer/src/services/azure-devops-service.ts',
-        'AdvancedPRReviewer/src/services/review-orchestrator.ts'
-      ];
+      // If branch diff fails, try to get files from the actual PR
+      console.log(`🔄 Branch diff failed, trying to get files from actual PR...`);
+      return await this.getFilesFromActualPR();
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.log(`⚠️ Branch-based fallback failed:`, errorMessage);
       
-      // Ultimate fallback
-      return ['AdvancedPRReviewer/src/agents/pr-review-agent.ts'];
+      // Try to get files from actual PR
+      return await this.getFilesFromActualPR();
+    }
+  }
+
+  private async getFilesFromActualPR(): Promise<string[]> {
+    console.log(`🔍 Trying to get files from actual PR...`);
+    
+    try {
+      // Get the actual PR details to see what files are really changed
+      const prDetails = await this.getPullRequestDetails();
+      console.log(`🔍 PR Details: ${prDetails.title} (${prDetails.sourceRefName} → ${prDetails.targetRefName})`);
+      
+      // Try to get the actual diff for this PR
+      const sourceBranch = prDetails.sourceRefName.replace('refs/heads/', '');
+      const targetBranch = prDetails.targetRefName.replace('refs/heads/', '');
+      
+      console.log(`🔍 Getting diff between ${targetBranch} and ${sourceBranch}`);
+      
+      // Use the repository ID instead of name for more reliable API calls
+      const repoId = tl.getVariable('Build.Repository.ID');
+      if (repoId) {
+        const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
+        console.log(`🔍 Repository ID diff URL: ${diffUrl}`);
+        
+        const response = await fetch(diffUrl, {
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          agent: this.httpsAgent
+        });
+        
+        if (response.ok) {
+          const diffData = await response.json();
+          console.log(`✅ Got diff data using repository ID`);
+          
+          if (diffData.changes && Array.isArray(diffData.changes)) {
+            const filePaths = diffData.changes
+              .filter((change: any) => change.item && change.item.changeType !== 'delete')
+              .map((change: any) => change.item.path);
+            
+            if (filePaths.length > 0) {
+              console.log(`✅ Found ${filePaths.length} changed files using repository ID`);
+              return filePaths;
+            }
+          }
+        } else {
+          console.log(`⚠️ Repository ID diff API failed: ${response.status} ${response.statusText}`);
+        }
+      }
+      
+      // Try to get files from the PR commits
+      console.log(`🔄 Trying to get files from PR commits...`);
+      const commitFiles = await this.getFilesFromPRCommits();
+      if (commitFiles.length > 0) {
+        console.log(`✅ Found ${commitFiles.length} files from PR commits`);
+        return commitFiles;
+      }
+      
+      // If all else fails, return empty array to avoid reviewing non-existent files
+      console.log(`⚠️ Could not determine actual changed files, returning empty array`);
+      return [];
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(`⚠️ Failed to get files from actual PR:`, errorMessage);
+      
+      // Return empty array to avoid reviewing non-existent files
+      return [];
+    }
+  }
+
+  private async getFilesFromPRCommits(): Promise<string[]> {
+    console.log(`🔍 Trying to get files from PR commits...`);
+    
+    try {
+      // Get the PR details to get the source branch
+      const prDetails = await this.getPullRequestDetails();
+      const sourceBranch = prDetails.sourceRefName.replace('refs/heads/', '');
+      
+      // Get commits from the source branch
+      const repoId = tl.getVariable('Build.Repository.ID');
+      if (repoId) {
+        const commitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/commits?searchCriteria.itemVersion.version=${sourceBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
+        console.log(`🔍 Commits URL: ${commitsUrl}`);
+        
+        const response = await fetch(commitsUrl, {
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          agent: this.httpsAgent
+        });
+        
+        if (response.ok) {
+          const commitsData = await response.json();
+          console.log(`✅ Got commits data: ${commitsData.value?.length || 0} commits`);
+          
+          if (commitsData.value && commitsData.value.length > 0) {
+            // Get the latest commit
+            const latestCommit = commitsData.value[0];
+            const commitId = latestCommit.commitId;
+            
+            console.log(`🔍 Getting changes for commit: ${commitId}`);
+            
+            // Get changes for this commit
+            const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/commits/${commitId}/changes?api-version=7.0`;
+            const changesResponse = await fetch(changesUrl, {
+              headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+              },
+              agent: this.httpsAgent
+            });
+            
+            if (changesResponse.ok) {
+              const changesData = await changesResponse.json();
+              console.log(`✅ Got changes data: ${changesData.changeCounts?.Add || 0} additions, ${changesData.changeCounts?.Edit || 0} edits`);
+              
+              if (changesData.changeCounts && (changesData.changeCounts.Add > 0 || changesData.changeCounts.Edit > 0)) {
+                // Get the actual file changes
+                const fileChanges = changesData.changes || [];
+                const filePaths = fileChanges
+                  .filter((change: any) => change.item && change.item.changeType !== 'delete')
+                  .map((change: any) => change.item.path);
+                
+                if (filePaths.length > 0) {
+                  console.log(`✅ Found ${filePaths.length} changed files from commit changes`);
+                  return filePaths;
+                }
+              }
+            } else {
+              console.log(`⚠️ Changes API failed: ${changesResponse.status} ${changesResponse.statusText}`);
+            }
+          }
+        } else {
+          console.log(`⚠️ Commits API failed: ${response.status} ${response.statusText}`);
+        }
+      }
+      
+      return [];
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(`⚠️ Failed to get files from PR commits:`, errorMessage);
+      return [];
     }
   }
 
@@ -781,8 +932,8 @@ export class AzureDevOpsService {
     console.log(`🔍 Validating file exists: ${filePath}`);
     
     try {
-      // Clean up the file path
-      const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+      // Clean up the file path - ensure it starts with /
+      const cleanPath = filePath.startsWith('/') ? filePath : '/' + filePath;
       
       // Try to get file info without content
       const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&api-version=7.0`;
@@ -812,8 +963,8 @@ export class AzureDevOpsService {
     console.log(`🔍 Getting file content for: ${filePath}`);
     console.log(`🔍 Target branch: ${targetBranch}`);
     
-    // Clean up the file path - remove leading slash if present
-    const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+    // Clean up the file path - ensure it starts with /
+    const cleanPath = filePath.startsWith('/') ? filePath : '/' + filePath;
     console.log(`🔍 Cleaned file path: ${cleanPath}`);
     
     const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&versionDescriptor.version=${targetBranch}&api-version=7.0`;
@@ -1487,8 +1638,8 @@ export class AzureDevOpsService {
         return hasExtension || isSpecificFile;
       })
       .map((path: string) => {
-        // Remove leading slash if present
-        return path.startsWith('/') ? path.substring(1) : path;
+        // Ensure path starts with / for Azure DevOps
+        return path.startsWith('/') ? path : '/' + path;
       });
     
     console.log(`✅ Validated and cleaned file paths: ${validFilePaths.length} files`);
