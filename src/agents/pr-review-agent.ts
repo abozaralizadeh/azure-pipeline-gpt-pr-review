@@ -124,6 +124,10 @@ export class AdvancedPRReviewAgent {
         body: JSON.stringify({
           messages: [
             {
+              role: "system",
+              content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+            },
+            {
               role: "user",
               content: prompt
             }
@@ -139,7 +143,12 @@ export class AdvancedPRReviewAgent {
 
       const data = await response.json() as any;
       this.llmCalls++;
-      return data.choices[0].message.content;
+      const content = data.choices[0].message.content;
+      
+      // Log the raw response for debugging
+      console.log(`🔍 Raw AI response (first 200 chars): ${content.substring(0, 200)}`);
+      
+      return content;
     } catch (error) {
       console.error("Error calling Azure OpenAI:", error);
       throw error;
@@ -148,25 +157,72 @@ export class AdvancedPRReviewAgent {
 
   private safeJsonParse(jsonString: string, fallback: any): any {
     try {
+      // Clean the response first
+      let cleanedResponse = jsonString.trim();
+      
+      // Remove any markdown code blocks
+      cleanedResponse = cleanedResponse.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+      
       // Try to parse the JSON string
-      return JSON.parse(jsonString);
+      return JSON.parse(cleanedResponse);
     } catch (parseError) {
       console.log(`⚠️ JSON parsing failed:`, parseError instanceof Error ? parseError.message : String(parseError));
       console.log(`🔍 Raw response:`, jsonString.substring(0, 200));
       
-      // Try to extract JSON from the response if it's embedded in text
-      try {
-        const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          console.log(`🔄 Attempting to extract JSON from response...`);
-          return JSON.parse(jsonMatch[0]);
+      // Try multiple extraction strategies
+      const extractionStrategies = [
+        // Strategy 1: Look for JSON object
+        () => {
+          const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            console.log(`🔄 Strategy 1: Extracting JSON object...`);
+            return JSON.parse(jsonMatch[0]);
+          }
+          return null;
+        },
+        // Strategy 2: Look for JSON array
+        () => {
+          const jsonMatch = jsonString.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            console.log(`🔄 Strategy 2: Extracting JSON array...`);
+            return JSON.parse(jsonMatch[0]);
+          }
+          return null;
+        },
+        // Strategy 3: Try to find JSON after "```json"
+        () => {
+          const jsonMatch = jsonString.match(/```json\s*(\{[\s\S]*?\})\s*```/);
+          if (jsonMatch) {
+            console.log(`🔄 Strategy 3: Extracting from markdown code block...`);
+            return JSON.parse(jsonMatch[1]);
+          }
+          return null;
+        },
+        // Strategy 4: Try to find JSON after "```"
+        () => {
+          const jsonMatch = jsonString.match(/```\s*(\{[\s\S]*?\})\s*```/);
+          if (jsonMatch) {
+            console.log(`🔄 Strategy 4: Extracting from code block...`);
+            return JSON.parse(jsonMatch[1]);
+          }
+          return null;
         }
-      } catch (extractError) {
-        console.log(`⚠️ JSON extraction also failed:`, extractError instanceof Error ? extractError.message : String(extractError));
+      ];
+      
+      for (const strategy of extractionStrategies) {
+        try {
+          const result = strategy();
+          if (result) {
+            console.log(`✅ JSON extraction successful`);
+            return result;
+          }
+        } catch (extractError) {
+          console.log(`⚠️ Strategy failed:`, extractError instanceof Error ? extractError.message : String(extractError));
+        }
       }
       
       // Return fallback if all parsing attempts fail
-      console.log(`🔄 Using fallback response structure`);
+      console.log(`🔄 All JSON extraction strategies failed, using fallback response structure`);
       return fallback;
     }
   }
@@ -249,28 +305,30 @@ For each issue, provide the EXACT line number from the modified file where the i
 
 IMPORTANT: If you notice that a previous issue has been addressed or fixed in this commit, mention it in your analysis.
 
+CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
+
 Use the following JSON schema for your response:
 {
   "issues": [
     {
-      "type": "bug" | "improvement" | "security" | "style" | "test",
-      "severity": "low" | "medium" | "high" | "critical",
+      "type": "bug",
+      "severity": "high",
       "description": "Detailed description of the issue",
-      "line_number": number (EXACT line number from modified file),
+      "line_number": 15,
       "suggestion": "Specific suggestion for improvement",
-      "confidence": number (0.0-1.0),
-      "code_snippet": "The actual code line that has the issue",
-      "is_new_issue": boolean (true if this is a new issue, false if it's a continuation of a previous issue)
+      "confidence": 0.9,
+      "code_snippet": "const example = 'bad code';",
+      "is_new_issue": true
     }
   ],
   "fixed_issues": [
     {
       "description": "Description of the issue that was fixed",
-      "line_number": number,
+      "line_number": 10,
       "fix_description": "How the issue was addressed"
     }
   ],
-  "overall_quality": "excellent" | "good" | "acceptable" | "needs_improvement" | "poor",
+  "overall_quality": "needs_improvement",
   "summary": "Brief summary of the review"
 }`;
 
@@ -420,20 +478,22 @@ Look for security vulnerabilities including:
 
 For each security issue, provide the EXACT line number from the modified file where the vulnerability occurs.
 
+CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
+
 Respond with JSON:
 {
   "security_issues": [
     {
-      "vulnerability_type": string,
-      "severity": "low" | "medium" | "high" | "critical",
-      "description": string,
-      "line_number": number (EXACT line number from modified file),
-      "recommendation": string,
-      "confidence": number,
-      "code_snippet": "The actual code line that has the security issue"
+      "vulnerability_type": "SQL Injection",
+      "severity": "high",
+      "description": "User input is directly concatenated into SQL query",
+      "line_number": 25,
+      "recommendation": "Use parameterized queries",
+      "confidence": 0.9,
+      "code_snippet": "const query = 'SELECT * FROM users WHERE id = ' + userId;"
     }
   ],
-  "overall_security_score": "A" | "B" | "C" | "D" | "F"
+  "overall_security_score": "C"
 }`;
 
     try {

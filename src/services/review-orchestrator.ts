@@ -287,9 +287,16 @@ export class ReviewOrchestrator {
     }
 
     // Post individual file comments with improved inline commenting
+    console.log(`💬 Processing ${reviewResults.length} review results for commenting...`);
+    
     for (const result of reviewResults) {
+      console.log(`🔍 Processing review result with ${result.review_comments.length} comments`);
+      
       for (const comment of result.review_comments) {
+        console.log(`🔍 Processing comment: ${comment.type} for ${comment.file} at line ${comment.line}`);
+        
         if (comment.file === 'PR_CONTEXT' || comment.file === 'FINAL_ASSESSMENT') {
+          console.log(`⏭️ Skipping context/final assessment comment`);
           continue; // Skip context and final assessment comments
         }
 
@@ -308,6 +315,9 @@ export class ReviewOrchestrator {
           if (comment.line && comment.line > 0) {
             // Post as inline comment with enhanced formatting
             const formattedComment = this.formatInlineComment(comment);
+            console.log(`💬 Posting inline comment for ${comment.file} at line ${comment.line}`);
+            console.log(`💬 Comment content: ${formattedComment.substring(0, 100)}...`);
+            
             await this.azureDevOpsService.addInlineComment(
               comment.file,
               formattedComment,
@@ -318,6 +328,9 @@ export class ReviewOrchestrator {
           } else {
             // Post as general comment for the file
             const fileComment = `**File: ${comment.file}**\n\n${this.formatComment(comment)}`;
+            console.log(`💬 Posting general comment for ${comment.file}`);
+            console.log(`💬 Comment content: ${fileComment.substring(0, 100)}...`);
+            
             await this.azureDevOpsService.addGeneralComment(fileComment);
             console.log(`✅ Posted general comment for ${comment.file}`);
           }
