@@ -14,7 +14,9 @@ export const PRReviewState = z.object({
     comment: z.string(),
     type: z.enum(["bug", "improvement", "security", "style", "test"]),
     confidence: z.number(),
-    suggestion: z.string().optional()
+    suggestion: z.string().optional(),
+    is_new_issue: z.boolean().optional(),
+    is_fixed: z.boolean().optional()
   })).default([]),
   llm_calls: z.number().default(0),
   max_llm_calls: z.number(),
@@ -245,6 +247,8 @@ Review the code for:
 
 For each issue, provide the EXACT line number from the modified file where the issue occurs.
 
+IMPORTANT: If you notice that a previous issue has been addressed or fixed in this commit, mention it in your analysis.
+
 Use the following JSON schema for your response:
 {
   "issues": [
@@ -255,7 +259,15 @@ Use the following JSON schema for your response:
       "line_number": number (EXACT line number from modified file),
       "suggestion": "Specific suggestion for improvement",
       "confidence": number (0.0-1.0),
-      "code_snippet": "The actual code line that has the issue"
+      "code_snippet": "The actual code line that has the issue",
+      "is_new_issue": boolean (true if this is a new issue, false if it's a continuation of a previous issue)
+    }
+  ],
+  "fixed_issues": [
+    {
+      "description": "Description of the issue that was fixed",
+      "line_number": number,
+      "fix_description": "How the issue was addressed"
     }
   ],
   "overall_quality": "excellent" | "good" | "acceptable" | "needs_improvement" | "poor",
@@ -266,6 +278,7 @@ Use the following JSON schema for your response:
       const response = await this.callAzureOpenAI(reviewPrompt);
       const review = this.safeJsonParse(response, {
         issues: [],
+        fixed_issues: [],
         overall_quality: "acceptable",
         summary: "Review completed with fallback parsing"
       });
@@ -283,9 +296,24 @@ Use the following JSON schema for your response:
               comment: issue.description,
               type: issue.type,
               confidence: issue.confidence,
-              suggestion: issue.suggestion
+              suggestion: issue.suggestion,
+              is_new_issue: issue.is_new_issue !== false // Default to true if not specified
             });
           }
+        });
+      }
+
+      // Add fixed issues as positive feedback
+      if (review.fixed_issues && Array.isArray(review.fixed_issues)) {
+        review.fixed_issues.forEach((fixedIssue: any) => {
+          state.review_comments.push({
+            file: state.current_file || "unknown",
+            line: fixedIssue.line_number,
+            comment: `✅ FIXED: ${fixedIssue.description}\n\n${fixedIssue.fix_description}`,
+            type: "improvement",
+            confidence: 0.9,
+            is_fixed: true
+          });
         });
       }
 

@@ -75,8 +75,9 @@ export class ReviewOrchestrator {
         throw new Error("No target branch found!");
       }
 
-      // Step 5: Clean up existing comments
-      await this.azureDevOpsService.deleteExistingComments();
+      // Step 5: Keep existing comments for better context and continuity
+      // await this.azureDevOpsService.deleteExistingComments();
+      console.log("📝 Keeping existing comments for better review continuity");
 
       // Step 6: Get changed files
       console.log(`🔍 Step 6: Getting changed files...`);
@@ -265,15 +266,42 @@ export class ReviewOrchestrator {
   ): Promise<void> {
     console.log("💬 Posting review results to Azure DevOps...");
 
-    // Post final summary as a general comment
-    const summaryComment = this.formatSummaryComment(finalSummary);
-    await this.azureDevOpsService.addGeneralComment(summaryComment);
+    // Get existing comments to avoid duplicates
+    let existingComments: any[] = [];
+    try {
+      const existingThreads = await this.azureDevOpsService.getExistingComments();
+      existingComments = existingThreads.flatMap(thread => thread.comments || []);
+      console.log(`📋 Found ${existingComments.length} existing comments`);
+    } catch (error) {
+      console.log(`⚠️ Could not fetch existing comments, proceeding with new comments`);
+    }
+
+    // Post final summary as a general comment (only if no recent summary exists)
+    const hasRecentSummary = this.hasRecentSummaryComment(existingComments);
+    if (!hasRecentSummary) {
+      const summaryComment = this.formatSummaryComment(finalSummary);
+      await this.azureDevOpsService.addGeneralComment(summaryComment);
+      console.log(`✅ Posted new summary comment`);
+    } else {
+      console.log(`📝 Recent summary comment exists, skipping duplicate`);
+    }
 
     // Post individual file comments with improved inline commenting
     for (const result of reviewResults) {
       for (const comment of result.review_comments) {
         if (comment.file === 'PR_CONTEXT' || comment.file === 'FINAL_ASSESSMENT') {
           continue; // Skip context and final assessment comments
+        }
+
+        // Check if this is a fixed issue - if so, we might want to continue the thread
+        if (comment.is_fixed) {
+          console.log(`✅ Found fixed issue for ${comment.file} at line ${comment.line}, posting positive feedback`);
+        } else {
+          // Check if similar comment already exists
+          if (this.isDuplicateComment(comment, existingComments)) {
+            console.log(`📝 Similar comment already exists for ${comment.file} at line ${comment.line}, skipping`);
+            continue;
+          }
         }
 
         try {
@@ -306,6 +334,90 @@ export class ReviewOrchestrator {
         }
       }
     }
+  }
+
+  private hasRecentSummaryComment(existingComments: any[]): boolean {
+    const recentThreshold = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+    const now = new Date().getTime();
+    
+    return existingComments.some(comment => {
+      if (!comment.content) return false;
+      
+      const isSummary = comment.content.includes('PR Review Summary') || 
+                       comment.content.includes('Review Statistics') ||
+                       comment.content.includes('Overall Assessment');
+      
+      if (!isSummary) return false;
+      
+      // Check if comment is recent (within 24 hours)
+      const commentTime = new Date(comment.publishedDate || comment.lastUpdatedDate || 0).getTime();
+      return (now - commentTime) < recentThreshold;
+    });
+  }
+
+  private isDuplicateComment(newComment: any, existingComments: any[]): boolean {
+    if (!newComment.file || !newComment.line) return false;
+    
+    return existingComments.some(existingComment => {
+      if (!existingComment.content) return false;
+      
+      // Check if it's the same file and line
+      const isSameLocation = existingComment.threadContext?.filePath === newComment.file &&
+                            (existingComment.threadContext?.rightFileStart?.line === newComment.line ||
+                             existingComment.threadContext?.rightFileEnd?.line === newComment.line);
+      
+      if (!isSameLocation) return false;
+      
+      // Check if it's a similar type of issue
+      const newType = newComment.type?.toLowerCase() || '';
+      const existingContent = existingComment.content.toLowerCase();
+      
+      const isSimilarType = existingContent.includes(newType) ||
+                           (newType === 'security' && existingContent.includes('security')) ||
+                           (newType === 'bug' && existingContent.includes('bug')) ||
+                           (newType === 'improvement' && existingContent.includes('improvement'));
+      
+      // Check if the comment is from our build service and not resolved
+      const isFromBuildService = existingComment.author?.displayName?.includes('Build Service');
+      const isNotResolved = !existingComment.isDeleted && existingComment.status !== 'resolved';
+      
+      return isSameLocation && isSimilarType && isFromBuildService && isNotResolved;
+    });
+  }
+
+  private shouldContinueThread(newComment: any, existingComments: any[]): { shouldContinue: boolean; threadId?: number } {
+    if (!newComment.file || !newComment.line) return { shouldContinue: false };
+    
+    const relatedThread = existingComments.find(existingComment => {
+      if (!existingComment.content) return false;
+      
+      // Check if it's the same file and line
+      const isSameLocation = existingComment.threadContext?.filePath === newComment.file &&
+                            (existingComment.threadContext?.rightFileStart?.line === newComment.line ||
+                             existingComment.threadContext?.rightFileEnd?.line === newComment.line);
+      
+      if (!isSameLocation) return false;
+      
+      // Check if it's a similar type of issue
+      const newType = newComment.type?.toLowerCase() || '';
+      const existingContent = existingComment.content.toLowerCase();
+      
+      const isSimilarType = existingContent.includes(newType) ||
+                           (newType === 'security' && existingContent.includes('security')) ||
+                           (newType === 'bug' && existingContent.includes('bug')) ||
+                           (newType === 'improvement' && existingContent.includes('improvement'));
+      
+      // Check if the comment is from our build service
+      const isFromBuildService = existingComment.author?.displayName?.includes('Build Service');
+      
+      return isSameLocation && isSimilarType && isFromBuildService;
+    });
+
+    if (relatedThread) {
+      return { shouldContinue: true, threadId: relatedThread.threadId };
+    }
+
+    return { shouldContinue: false };
   }
 
   private formatInlineComment(comment: any): string {
