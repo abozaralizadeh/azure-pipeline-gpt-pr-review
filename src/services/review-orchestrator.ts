@@ -333,13 +333,11 @@ export class ReviewOrchestrator {
             );
             console.log(`✅ Posted inline comment for ${comment.file} at line ${comment.line}`);
           } else {
-            // Post as general comment for the file
-            const fileComment = `**File: ${comment.file}**\n\n${this.formatComment(comment)}`;
-            console.log(`💬 Posting general comment for ${comment.file}`);
-            console.log(`💬 Comment content: ${fileComment.substring(0, 100)}...`);
-            
-            await this.azureDevOpsService.addGeneralComment(fileComment);
-            console.log(`✅ Posted general comment for ${comment.file}`);
+            // Skip comments without valid line numbers to avoid posting irrelevant comments
+            console.log(`⏭️ Skipping comment without valid line number: ${comment.type} - ${comment.comment?.substring(0, 50)}...`);
+            console.log(`⏭️ Line number: ${comment.line} (0 means no valid line found)`);
+            console.log(`⏭️ This prevents posting comments on wrong lines`);
+            continue;
           }
         } catch (error: any) {
           console.error(`❌ Error posting comment for ${comment.file}:`, error.message);

@@ -284,22 +284,53 @@ Respond with JSON:
     // Parse the diff to extract line numbers and changes
     const diffAnalysis = this.analyzeDiff(state.file_diff || '');
     
+    // First, check for obvious syntax errors in the changed content
+    const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown');
+    if (syntaxErrors.length > 0) {
+      console.log(`🚨 Detected ${syntaxErrors.length} syntax errors in changed content`);
+      for (const error of syntaxErrors) {
+        state.review_comments.push({
+          file: state.current_file || "unknown",
+          line: error.lineNumber,
+          comment: `SYNTAX ERROR: ${error.message}`,
+          type: "bug",
+          confidence: 1.0,
+          suggestion: error.suggestion,
+          is_new_issue: true
+        });
+      }
+    }
+    
     const reviewPrompt = `You are an expert code reviewer. Analyze the following file changes and provide detailed feedback.
 
 File: ${state.current_file}
 File Content: ${state.file_content}
 File Diff: ${state.file_diff}
 
-IMPORTANT: When providing line numbers, use the line numbers from the MODIFIED file (right side of diff). 
-The diff shows changes with + for additions and - for deletions. Focus on the actual line numbers in the modified file.
+CHANGED LINES IN THIS PR:
+${diffAnalysis.changedContent.map((line, index) => `Line ${diffAnalysis.addedLines[index]}: ${line}`).join('\n')}
 
-Review the code for:
-1. Correctness and logic errors
-2. Code quality and readability
-3. Performance issues
-4. Maintainability concerns
-5. Adherence to coding standards
-6. Test coverage needs
+CRITICAL: Look for these OBVIOUS problems first:
+1. SYNTAX ERRORS - broken code, missing brackets, invalid syntax
+2. GIBBERISH TEXT - random characters, nonsensical code
+3. BROKEN STRUCTURE - incomplete objects, missing properties
+4. TYPO ERRORS - obvious typos in code
+5. LOGIC ERRORS - code that doesn't make sense
+
+IMPORTANT INSTRUCTIONS:
+1. ONLY comment on code that was actually CHANGED in this PR (the lines shown above)
+2. Use the EXACT line numbers from the modified file (right side of diff)
+3. Focus on the specific changes made, not the entire file
+4. Provide relevant suggestions that match the actual code being changed
+5. PRIORITIZE obvious syntax errors and broken code over minor style issues
+
+Review the CHANGED code for:
+1. SYNTAX ERRORS and broken code (HIGHEST PRIORITY)
+2. Logic errors and correctness
+3. Code quality and readability
+4. Performance issues
+5. Security vulnerabilities
+6. Maintainability concerns
 
 For each issue, provide the EXACT line number from the modified file where the issue occurs.
 
@@ -330,7 +361,16 @@ Use the following JSON schema for your response:
   ],
   "overall_quality": "needs_improvement",
   "summary": "Brief summary of the review"
-}`;
+}
+
+CRITICAL REQUIREMENTS:
+1. For each issue, you MUST provide the EXACT line_number from the modified file
+2. You MUST include the code_snippet that contains the issue - this should be the EXACT code from that line
+3. The line_number must correspond to the actual line in the modified file where the issue occurs
+4. The code_snippet must match the actual code on that line (whitespace differences are OK)
+5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
+6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
+7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)`;
 
     try {
       const response = await this.callAzureOpenAI(reviewPrompt);
@@ -383,64 +423,418 @@ Use the following JSON schema for your response:
     }
   }
 
-  private analyzeDiff(diff: string): { addedLines: number[]; removedLines: number[]; modifiedLines: number[] } {
+  private analyzeDiff(diff: string): { addedLines: number[]; removedLines: number[]; modifiedLines: number[]; changedContent: string[] } {
     const addedLines: number[] = [];
     const removedLines: number[] = [];
     const modifiedLines: number[] = [];
+    const changedContent: string[] = [];
     
     if (!diff) {
-      return { addedLines, removedLines, modifiedLines };
+      return { addedLines, removedLines, modifiedLines, changedContent };
     }
 
+    console.log(`🔍 Analyzing diff (${diff.length} chars):`);
+    console.log(`📝 Diff preview: ${diff.substring(0, 200)}...`);
+
     const lines = diff.split('\n');
-    let currentLine = 0;
+    let rightLineNumber = 0;
+    let leftLineNumber = 0;
+    let inHunk = false;
 
     for (const line of lines) {
       if (line.startsWith('@@')) {
-        // Parse hunk header to get starting line numbers
+        // Parse hunk header: @@ -leftStart,leftCount +rightStart,rightCount @@
         const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
         if (match) {
-          currentLine = parseInt(match[3]) - 1; // Start of modified lines
+          leftLineNumber = parseInt(match[1]) - 1; // Convert to 0-based
+          rightLineNumber = parseInt(match[3]) - 1; // Convert to 0-based
+          inHunk = true;
+          console.log(`🔍 Hunk: left starts at ${leftLineNumber + 1}, right starts at ${rightLineNumber + 1}`);
         }
-      } else if (line.startsWith('+')) {
-        // Added line
-        currentLine++;
-        addedLines.push(currentLine);
-      } else if (line.startsWith('-')) {
-        // Removed line - don't increment current line
-        // removedLines.push(currentLine);
-      } else if (line.startsWith(' ')) {
-        // Context line
-        currentLine++;
+      } else if (inHunk) {
+        if (line.startsWith('+')) {
+          // Added line in the modified file
+          rightLineNumber++;
+          addedLines.push(rightLineNumber);
+          changedContent.push(line.substring(1)); // Remove the + prefix
+          console.log(`➕ Added line ${rightLineNumber}: ${line.substring(1).substring(0, 50)}...`);
+        } else if (line.startsWith('-')) {
+          // Removed line from the original file
+          leftLineNumber++;
+          removedLines.push(leftLineNumber);
+          console.log(`➖ Removed line ${leftLineNumber}: ${line.substring(1).substring(0, 50)}...`);
+        } else if (line.startsWith(' ')) {
+          // Context line (unchanged)
+          leftLineNumber++;
+          rightLineNumber++;
+        } else if (line.trim() === '') {
+          // Empty line
+          rightLineNumber++;
+        }
       }
     }
 
-    return { addedLines, removedLines, modifiedLines };
+    console.log(`✅ Diff analysis complete: ${addedLines.length} added, ${removedLines.length} removed, ${changedContent.length} changed content lines`);
+    return { addedLines, removedLines, modifiedLines, changedContent };
+  }
+
+  private detectSyntaxErrors(changedContent: string[], addedLines: number[], fileName: string): Array<{lineNumber: number, message: string, suggestion: string}> {
+    const errors: Array<{lineNumber: number, message: string, suggestion: string}> = [];
+    
+    if (!changedContent || changedContent.length === 0 || !addedLines || addedLines.length === 0) {
+      return errors;
+    }
+    
+    console.log(`🔍 Detecting syntax errors in ${changedContent.length} changed lines`);
+    
+    for (let i = 0; i < changedContent.length; i++) {
+      const line = changedContent[i];
+      const lineNumber = addedLines[i] || (i + 1); // Use actual line number from diff
+      
+      // Check for obvious gibberish or random characters
+      if (this.isGibberish(line)) {
+        errors.push({
+          lineNumber: lineNumber,
+          message: `Line contains gibberish or random characters: "${line.substring(0, 50)}..."`,
+          suggestion: "Replace with valid code or remove if not needed"
+        });
+        console.log(`🚨 Gibberish detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
+        continue;
+      }
+      
+      // Check for obvious syntax errors
+      if (this.hasObviousSyntaxError(line)) {
+        errors.push({
+          lineNumber: lineNumber,
+          message: `Obvious syntax error: "${line}"`,
+          suggestion: "Fix the syntax error or remove the line"
+        });
+        console.log(`🚨 Syntax error detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
+        continue;
+      }
+      
+      // Check for incomplete code structures
+      if (this.isIncompleteStructure(line)) {
+        errors.push({
+          lineNumber: lineNumber,
+          message: `Incomplete code structure: "${line}"`,
+          suggestion: "Complete the code structure or remove if not needed"
+        });
+        console.log(`🚨 Incomplete structure detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
+        continue;
+      }
+    }
+    
+    console.log(`✅ Syntax error detection complete: ${errors.length} errors found`);
+    return errors;
+  }
+  
+  private isGibberish(line: string): boolean {
+    // Check for lines with random characters, no spaces, and no recognizable patterns
+    const trimmed = line.trim();
+    
+    // Skip empty lines
+    if (!trimmed) return false;
+    
+    // Skip comments
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) return false;
+    
+    // Check for gibberish patterns
+    const hasRandomChars = /^[a-z]{10,}$/i.test(trimmed); // Long strings of random letters
+    const hasMixedGibberish = /^[a-z0-9]{8,}[^a-z0-9\s]/.test(trimmed); // Mixed random chars
+    const hasNoSpaces = !trimmed.includes(' ') && trimmed.length > 15; // Long strings without spaces
+    const hasTypoPattern = /^[a-z]+\s+[a-z]+\s+[a-z0-9]+$/i.test(trimmed); // Pattern like "has_issuexz czdxcsdmnvcasjh ascjkb"
+    const hasBrokenCode = /^[a-z_]+\s+[a-z0-9]+\s*$/.test(trimmed) && !trimmed.includes('=') && !trimmed.includes(':'); // Broken variable declarations
+    
+    return hasRandomChars || hasMixedGibberish || hasNoSpaces || hasTypoPattern || hasBrokenCode;
+  }
+  
+  private hasObviousSyntaxError(line: string): boolean {
+    const trimmed = line.trim();
+    
+    // Check for obvious syntax errors
+    const hasUnclosedString = (trimmed.match(/"/g) || []).length % 2 !== 0;
+    const hasUnclosedParen = (trimmed.match(/\(/g) || []).length !== (trimmed.match(/\)/g) || []).length;
+    const hasUnclosedBracket = (trimmed.match(/\[/g) || []).length !== (trimmed.match(/\]/g) || []).length;
+    const hasUnclosedBrace = (trimmed.match(/\{/g) || []).length !== (trimmed.match(/\}/g) || []).length;
+    const hasInvalidChars = /[^\w\s\(\)\[\]\{\}\.,;:=\+\-\*\/%<>!&|^~`'"@#$\\]/.test(trimmed);
+    
+    return hasUnclosedString || hasUnclosedParen || hasUnclosedBracket || hasUnclosedBrace || hasInvalidChars;
+  }
+  
+  private isIncompleteStructure(line: string): boolean {
+    const trimmed = line.trim();
+    
+    // Check for incomplete structures
+    const hasIncompleteObject = trimmed.includes('{') && !trimmed.includes('}');
+    const hasIncompleteArray = trimmed.includes('[') && !trimmed.includes(']');
+    const hasIncompleteFunction = trimmed.includes('function') && !trimmed.includes('{');
+    const hasIncompleteIf = trimmed.includes('if') && !trimmed.includes('{') && !trimmed.includes(';');
+    const hasIncompleteAssignment = trimmed.includes('=') && !trimmed.includes(';') && !trimmed.includes(',');
+    
+    return hasIncompleteObject || hasIncompleteArray || hasIncompleteFunction || hasIncompleteIf || hasIncompleteAssignment;
   }
 
   private findBestLineNumber(issue: any, diffAnalysis: any, fileContent: string): number {
-    // If the issue already has a line number, use it
-    if (issue.line_number && issue.line_number > 0) {
-      return issue.line_number;
+    console.log(`🔍 Finding best line number for issue:`, {
+      type: issue.type,
+      description: issue.description?.substring(0, 50),
+      hasLineNumber: !!issue.line_number,
+      hasCodeSnippet: !!issue.code_snippet,
+      addedLines: diffAnalysis.addedLines?.length || 0,
+      changedContent: diffAnalysis.changedContent?.length || 0
+    });
+
+    // Log the changed content for debugging
+    if (diffAnalysis.changedContent && diffAnalysis.changedContent.length > 0) {
+      console.log(`📝 Changed content lines:`);
+      diffAnalysis.changedContent.forEach((line: string, index: number) => {
+        console.log(`  Line ${diffAnalysis.addedLines[index]}: ${line.substring(0, 100)}...`);
+      });
     }
 
-    // Try to find the line by searching for the code snippet
-    if (issue.code_snippet) {
-      const lines = fileContent.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes(issue.code_snippet.trim())) {
-          return i + 1; // Convert to 1-based line number
-        }
+    // If the issue already has a line number, validate it first
+    if (issue.line_number && issue.line_number > 0) {
+      console.log(`🔍 Validating provided line number: ${issue.line_number}`);
+      
+      // Check if the line number makes sense for the issue
+      if (this.validateLineNumberForIssue(issue, issue.line_number, fileContent)) {
+        console.log(`✅ Using validated line number: ${issue.line_number}`);
+        return issue.line_number;
+      } else {
+        console.log(`❌ Line number ${issue.line_number} doesn't match the issue, searching for better match...`);
       }
     }
 
-    // If we have added lines, use the first one as a fallback
-    if (diffAnalysis.addedLines.length > 0) {
-      return diffAnalysis.addedLines[0];
+    // Try to find the line by searching for the code snippet in the changed content first
+    if (issue.code_snippet && diffAnalysis.changedContent) {
+      const snippet = issue.code_snippet.trim();
+      console.log(`🔍 Searching for code snippet: "${snippet}"`);
+      for (let i = 0; i < diffAnalysis.changedContent.length; i++) {
+        if (diffAnalysis.changedContent[i].includes(snippet)) {
+          const lineNumber = diffAnalysis.addedLines[i];
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            console.log(`✅ Found validated code snippet in changed content at line ${lineNumber}`);
+            return lineNumber;
+          }
+        }
+      }
+      console.log(`❌ Code snippet not found in changed content or validation failed`);
     }
 
-    // Default fallback
-    return 1;
+    // Try to find the line by searching for the code snippet in the full file
+    if (issue.code_snippet) {
+      const snippet = issue.code_snippet.trim();
+      console.log(`🔍 Searching for code snippet in full file: "${snippet}"`);
+      const lines = fileContent.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(snippet)) {
+          const lineNumber = i + 1;
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            console.log(`✅ Found validated code snippet in full file at line ${lineNumber}`);
+            return lineNumber;
+          }
+        }
+      }
+      console.log(`❌ Code snippet not found in full file or validation failed`);
+    }
+
+    // Try to find by searching for keywords in the changed content
+    if (issue.description && diffAnalysis.changedContent) {
+      const keywords = issue.description.toLowerCase().split(' ').filter((word: string) => word.length > 3);
+      console.log(`🔍 Searching for keywords in changed content:`, keywords);
+      for (let i = 0; i < diffAnalysis.changedContent.length; i++) {
+        const line = diffAnalysis.changedContent[i].toLowerCase();
+        const matchingKeywords = keywords.filter((keyword: string) => line.includes(keyword));
+        if (matchingKeywords.length > 0) {
+          const lineNumber = diffAnalysis.addedLines[i];
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            console.log(`✅ Found validated keyword match in changed content at line ${lineNumber} (keywords: ${matchingKeywords.join(', ')})`);
+            return lineNumber;
+          }
+        }
+      }
+      console.log(`❌ No validated keyword matches found in changed content`);
+    }
+
+    // Try to find by searching for keywords in the full file
+    if (issue.description) {
+      const keywords = issue.description.toLowerCase().split(' ').filter((word: string) => word.length > 3);
+      console.log(`🔍 Searching for keywords in full file:`, keywords);
+      const lines = fileContent.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].toLowerCase();
+        const matchingKeywords = keywords.filter((keyword: string) => line.includes(keyword));
+        if (matchingKeywords.length > 0) {
+          const lineNumber = i + 1;
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            console.log(`✅ Found validated keyword match in full file at line ${lineNumber} (keywords: ${matchingKeywords.join(', ')})`);
+            return lineNumber;
+          }
+        }
+      }
+      console.log(`❌ No validated keyword matches found in full file`);
+    }
+
+    // Try to find the issue by searching for specific patterns in the full file
+    if (issue.description) {
+      const description = issue.description.toLowerCase();
+      console.log(`🔍 Searching for issue patterns in full file: "${description}"`);
+      
+      const lines = fileContent.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].toLowerCase();
+        
+        // Look for specific patterns based on the issue type - language agnostic
+        if (issue.type === 'security') {
+          // Look for logging patterns in any language
+          if (description.includes('log') && (
+            line.includes('console.log') || // JavaScript/TypeScript
+            line.includes('print(') || // Python
+            line.includes('System.out.println') || // Java
+            line.includes('Console.WriteLine') || // C#
+            line.includes('printf') || // C/C++
+            line.includes('logger.') || // Various logging frameworks
+            line.includes('log.') // Various logging frameworks
+          )) {
+            const lineNumber = i + 1;
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+              console.log(`✅ Found validated logging line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
+              return lineNumber;
+            }
+          }
+          
+          // Look for endpoint/URL patterns
+          if (description.includes('endpoint') && (
+            line.includes('endpoint') ||
+            line.includes('url') ||
+            line.includes('uri') ||
+            line.includes('http') ||
+            line.includes('https')
+          )) {
+            const lineNumber = i + 1;
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+              console.log(`✅ Found validated endpoint-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
+              return lineNumber;
+            }
+          }
+          
+          // Look for API key patterns
+          if (description.includes('api') && (
+            line.includes('api') ||
+            line.includes('key') ||
+            line.includes('token') ||
+            line.includes('secret') ||
+            line.includes('password')
+          )) {
+            const lineNumber = i + 1;
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+              console.log(`✅ Found validated API key-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
+              return lineNumber;
+            }
+          }
+        }
+        
+        if (issue.type === 'bug') {
+          // Look for syntax issues in any language
+          if (description.includes('syntax') && (
+            line.includes('{') || line.includes('}') || // Braces
+            line.includes('(') || line.includes(')') || // Parentheses
+            line.includes('[') || line.includes(']') || // Brackets
+            line.includes(';') || // Semicolons
+            line.includes('=') || // Assignments
+            line.includes('def ') || // Python functions
+            line.includes('function ') || // JavaScript functions
+            line.includes('public ') || // Java/C# methods
+            line.includes('private ') // Java/C# methods
+          )) {
+            const lineNumber = i + 1;
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+              console.log(`✅ Found validated syntax-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
+              return lineNumber;
+            }
+          }
+        }
+      }
+      console.log(`❌ No validated patterns found in full file`);
+    }
+
+    // If we can't find a valid line, return 0 to indicate no valid line found
+    console.log(`❌ No valid line found for this issue - returning 0 to skip comment`);
+    return 0;
+  }
+
+  private validateLineNumberForIssue(issue: any, lineNumber: number, fileContent: string): boolean {
+    if (!lineNumber || lineNumber <= 0) return false;
+    
+    const lines = fileContent.split('\n');
+    if (lineNumber > lines.length) return false;
+    
+    const line = lines[lineNumber - 1];
+    const description = issue.description?.toLowerCase() || '';
+    const codeSnippet = issue.code_snippet?.toLowerCase() || '';
+    
+    console.log(`🔍 Validating line ${lineNumber} for issue:`, {
+      type: issue.type,
+      description: description.substring(0, 50),
+      codeSnippet: codeSnippet.substring(0, 50),
+      actualLine: line.substring(0, 100)
+    });
+    
+    // If we have a code snippet, the line should contain that snippet
+    if (codeSnippet && codeSnippet.trim()) {
+      const normalizedLine = line.toLowerCase().trim();
+      const normalizedSnippet = codeSnippet.trim();
+      
+      // Check if the line contains the code snippet (with some flexibility for whitespace)
+      const snippetWords = normalizedSnippet.split(/\s+/).filter((word: string) => word.length > 0);
+      const lineWords = normalizedLine.split(/\s+/).filter((word: string) => word.length > 0);
+      
+      // Check if most of the snippet words are present in the line
+      const matchingWords = snippetWords.filter((snippetWord: string) => 
+        lineWords.some((lineWord: string) => lineWord.includes(snippetWord) || snippetWord.includes(lineWord))
+      );
+      
+      const matchRatio = matchingWords.length / snippetWords.length;
+      
+      if (matchRatio < 0.5) { // At least 50% of words should match
+        console.log(`❌ Line ${lineNumber} doesn't contain the code snippet. Match ratio: ${matchRatio.toFixed(2)}`);
+        console.log(`❌ Expected: "${codeSnippet}"`);
+        console.log(`❌ Actual: "${line}"`);
+        return false;
+      }
+      
+      console.log(`✅ Line ${lineNumber} contains the code snippet. Match ratio: ${matchRatio.toFixed(2)}`);
+      return true;
+    }
+    
+    // If no code snippet, check if the line contains keywords from the description
+    if (description) {
+      const descriptionWords = description.split(/\s+/)
+        .filter((word: string) => word.length > 3) // Only meaningful words
+        .map((word: string) => word.toLowerCase());
+      
+      const lineWords = line.toLowerCase().split(/\s+/);
+      
+      // Check if any significant words from the description appear in the line
+      const matchingKeywords = descriptionWords.filter((descWord: string) => 
+        lineWords.some((lineWord: string) => lineWord.includes(descWord) || descWord.includes(lineWord))
+      );
+      
+      if (matchingKeywords.length === 0) {
+        console.log(`❌ Line ${lineNumber} doesn't contain any keywords from the issue description`);
+        console.log(`❌ Description keywords: ${descriptionWords.join(', ')}`);
+        console.log(`❌ Line content: "${line}"`);
+        return false;
+      }
+      
+      console.log(`✅ Line ${lineNumber} contains relevant keywords: ${matchingKeywords.join(', ')}`);
+      return true;
+    }
+    
+    // If no code snippet or description, we can't validate - return false to be safe
+    console.log(`❌ No code snippet or description available for validation`);
+    return false;
   }
 
   private async securityScan(state: PRReviewStateType): Promise<PRReviewStateType> {
@@ -461,18 +855,33 @@ File: ${state.current_file}
 Code: ${state.file_content}
 File Diff: ${state.file_diff}
 
-IMPORTANT: When providing line numbers, use the line numbers from the MODIFIED file (right side of diff). 
-Focus on the actual line numbers in the modified file where security issues occur.
+CHANGED LINES IN THIS PR:
+${diffAnalysis.changedContent.map((line, index) => `Line ${diffAnalysis.addedLines[index]}: ${line}`).join('\n')}
 
-Look for security vulnerabilities including:
-1. SQL injection
-2. XSS vulnerabilities
-3. Hardcoded secrets
-4. Insecure authentication
-5. Input validation issues
-6. Authorization bypasses
-7. Insecure dependencies
-8. Logging of sensitive information
+CRITICAL: Look for these OBVIOUS security problems first:
+1. HARDCODED SECRETS - API keys, passwords, tokens in plain text
+2. LOGGING SENSITIVE DATA - console.log with secrets, API keys, user data
+3. INSECURE AUTHENTICATION - missing validation, weak checks
+4. INPUT VALIDATION - missing sanitization, direct user input usage
+5. SQL INJECTION - direct string concatenation in queries
+6. XSS VULNERABILITIES - unescaped user input in HTML/JS
+
+IMPORTANT INSTRUCTIONS:
+1. ONLY analyze code that was actually CHANGED in this PR (the lines shown above)
+2. Use the EXACT line numbers from the modified file (right side of diff)
+3. Focus on security issues in the specific changes made
+4. Provide relevant security recommendations that match the actual code being changed
+5. PRIORITIZE obvious security vulnerabilities over minor issues
+
+Look for security vulnerabilities in the CHANGED code including:
+1. Hardcoded secrets and credentials
+2. Logging of sensitive information
+3. Input validation issues
+4. SQL injection vulnerabilities
+5. XSS vulnerabilities
+6. Insecure authentication
+7. Authorization bypasses
+8. Insecure dependencies
 9. Prompt injection vulnerabilities
 10. Input sanitization issues
 
@@ -494,7 +903,16 @@ Respond with JSON:
     }
   ],
   "overall_security_score": "C"
-}`;
+}
+
+CRITICAL REQUIREMENTS:
+1. For each security issue, you MUST provide the EXACT line_number from the modified file
+2. You MUST include the code_snippet that contains the vulnerability - this should be the EXACT code from that line
+3. The line_number must correspond to the actual line in the modified file where the vulnerability occurs
+4. The code_snippet must match the actual code on that line (whitespace differences are OK)
+5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
+6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
+7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)`;
 
     try {
       const response = await this.callAzureOpenAI(securityPrompt);
