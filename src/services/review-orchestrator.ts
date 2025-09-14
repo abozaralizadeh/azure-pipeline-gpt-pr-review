@@ -238,14 +238,29 @@ export class ReviewOrchestrator {
       comment.type === 'security' || comment.type === 'bug'
     ).length;
 
+    // Check if any review result has a final assessment
+    const finalAssessment = reviewResults.find(result => result.final_assessment)?.final_assessment;
+
     let overallAssessment = 'approve';
     let requiresChanges = false;
+    let summaryText = this.generateSummaryText(allComments, prDetails);
+    let recommendations = this.generateRecommendations(allComments);
 
-    if (criticalIssues > 0) {
-      overallAssessment = 'request_changes';
-      requiresChanges = true;
-    } else if (totalIssues > 5) {
-      overallAssessment = 'approve_with_suggestions';
+    // Use final assessment if available, otherwise generate from comments
+    if (finalAssessment) {
+      console.log("📊 Using final assessment from AI");
+      overallAssessment = finalAssessment.overall_assessment;
+      summaryText = finalAssessment.summary;
+      recommendations = finalAssessment.recommendations;
+      requiresChanges = overallAssessment === 'request_changes';
+    } else {
+      // Fallback to comment-based assessment
+      if (criticalIssues > 0) {
+        overallAssessment = 'request_changes';
+        requiresChanges = true;
+      } else if (totalIssues > 5) {
+        overallAssessment = 'approve_with_suggestions';
+      }
     }
 
     const summary = {
@@ -260,8 +275,8 @@ export class ReviewOrchestrator {
       test_issues: allComments.filter(c => c.type === 'test').length,
       requires_changes: requiresChanges,
       can_approve: !requiresChanges,
-      summary: this.generateSummaryText(allComments, prDetails),
-      recommendations: this.generateRecommendations(allComments)
+      summary: summaryText,
+      recommendations: recommendations
     };
 
     return summary;
@@ -302,9 +317,9 @@ export class ReviewOrchestrator {
       for (const comment of result.review_comments) {
         console.log(`🔍 Processing comment: ${comment.type} for ${comment.file} at line ${comment.line}`);
         
-        if (comment.file === 'PR_CONTEXT' || comment.file === 'FINAL_ASSESSMENT') {
-          console.log(`⏭️ Skipping context/final assessment comment`);
-          continue; // Skip context and final assessment comments
+        if (comment.file === 'PR_CONTEXT') {
+          console.log(`⏭️ Skipping context comment`);
+          continue; // Skip context comments
         }
 
         // Check if this is a fixed issue - if so, we might want to continue the thread

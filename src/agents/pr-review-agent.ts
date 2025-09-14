@@ -30,6 +30,13 @@ export const PRReviewState = z.object({
     target_branch: z.string(),
     source_branch: z.string(),
     changed_files: z.array(z.string())
+  }).optional(),
+  final_assessment: z.object({
+    overall_assessment: z.string(),
+    summary: z.string(),
+    key_issues: z.string(),
+    recommendations: z.string(),
+    confidence: z.number()
   }).optional()
 });
 
@@ -301,28 +308,42 @@ Respond with JSON:
       }
     }
     
-    const reviewPrompt = `You are an expert code reviewer. Analyze the following file changes and provide detailed feedback.
+    // Create a focused context with ONLY the changed lines
+    const changedLinesContext = diffAnalysis.changedContent.map((line, index) => {
+      const lineNumber = diffAnalysis.addedLines[index];
+      return `Line ${lineNumber}: ${line}`;
+    }).join('\n');
+
+    const reviewPrompt = `You are an expert code reviewer. Analyze ONLY the following changed lines from a Pull Request.
 
 File: ${state.current_file}
-File Content: ${state.file_content}
-File Diff: ${state.file_diff}
 
-CHANGED LINES IN THIS PR:
-${diffAnalysis.changedContent.map((line, index) => `Line ${diffAnalysis.addedLines[index]}: ${line}`).join('\n')}
+CHANGED LINES ONLY (these are the ONLY lines you can comment on):
+${changedLinesContext}
 
-CRITICAL: Look for these OBVIOUS problems first:
+IMPORTANT: You are ONLY seeing the changed lines. Do NOT assume there is other code in the file.
+
+CRITICAL RULES - READ CAREFULLY:
+1. YOU CAN ONLY COMMENT ON THE LINES LISTED ABOVE - these are the ONLY lines that were changed
+2. DO NOT comment on any other lines in the file, even if they have issues
+3. If the changed lines don't have any issues, return an empty issues array
+4. Focus ONLY on problems in the actual changes made
+5. Use the EXACT line numbers provided above
+
+CRITICAL: Look for these OBVIOUS problems in the CHANGED LINES ONLY:
 1. SYNTAX ERRORS - broken code, missing brackets, invalid syntax
-2. GIBBERISH TEXT - random characters, nonsensical code
+2. GIBBERISH TEXT - random characters, nonsensical code  
 3. BROKEN STRUCTURE - incomplete objects, missing properties
 4. TYPO ERRORS - obvious typos in code
 5. LOGIC ERRORS - code that doesn't make sense
 
 IMPORTANT INSTRUCTIONS:
 1. ONLY comment on code that was actually CHANGED in this PR (the lines shown above)
-2. Use the EXACT line numbers from the modified file (right side of diff)
+2. Use the EXACT line numbers from the changed lines list
 3. Focus on the specific changes made, not the entire file
 4. Provide relevant suggestions that match the actual code being changed
 5. PRIORITIZE obvious syntax errors and broken code over minor style issues
+6. If no issues are found in the changed lines, return empty issues array
 
 Review the CHANGED code for:
 1. SYNTAX ERRORS and broken code (HIGHEST PRIORITY)
@@ -332,9 +353,7 @@ Review the CHANGED code for:
 5. Security vulnerabilities
 6. Maintainability concerns
 
-For each issue, provide the EXACT line number from the modified file where the issue occurs.
-
-IMPORTANT: If you notice that a previous issue has been addressed or fixed in this commit, mention it in your analysis.
+For each issue, provide the EXACT line number from the changed lines list where the issue occurs.
 
 CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
 
@@ -381,22 +400,26 @@ CRITICAL REQUIREMENTS:
         summary: "Review completed with fallback parsing"
       });
       
-      // Add review comments to state with improved line number detection
+      // Add review comments to state with STRICT validation for changed lines only
       if (review.issues && Array.isArray(review.issues)) {
         review.issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
-            // Try to find the best line number for this issue
-            const bestLineNumber = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
-            
-            state.review_comments.push({
-              file: state.current_file || "unknown",
-              line: bestLineNumber,
-              comment: issue.description,
-              type: issue.type,
-              confidence: issue.confidence,
-              suggestion: issue.suggestion,
-              is_new_issue: issue.is_new_issue !== false // Default to true if not specified
-            });
+            // CRITICAL: Only process issues that have line numbers in the changed lines
+            if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
+              console.log(`✅ Issue line ${issue.line_number} is in changed lines - processing`);
+              
+              state.review_comments.push({
+                file: state.current_file || "unknown",
+                line: issue.line_number,
+                comment: issue.description,
+                type: issue.type,
+                confidence: issue.confidence,
+                suggestion: issue.suggestion,
+                is_new_issue: issue.is_new_issue !== false // Default to true if not specified
+              });
+            } else {
+              console.log(`❌ Issue line ${issue.line_number} is NOT in changed lines (${diffAnalysis.addedLines.join(', ')}) - SKIPPING`);
+            }
           }
         });
       }
@@ -598,7 +621,7 @@ CRITICAL REQUIREMENTS:
       console.log(`🔍 Validating provided line number: ${issue.line_number}`);
       
       // Check if the line number makes sense for the issue
-      if (this.validateLineNumberForIssue(issue, issue.line_number, fileContent)) {
+      if (this.validateLineNumberForIssue(issue, issue.line_number, fileContent, diffAnalysis.addedLines)) {
         console.log(`✅ Using validated line number: ${issue.line_number}`);
         return issue.line_number;
       } else {
@@ -613,7 +636,7 @@ CRITICAL REQUIREMENTS:
       for (let i = 0; i < diffAnalysis.changedContent.length; i++) {
         if (diffAnalysis.changedContent[i].includes(snippet)) {
           const lineNumber = diffAnalysis.addedLines[i];
-          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
             console.log(`✅ Found validated code snippet in changed content at line ${lineNumber}`);
             return lineNumber;
           }
@@ -630,7 +653,7 @@ CRITICAL REQUIREMENTS:
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].includes(snippet)) {
           const lineNumber = i + 1;
-          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
             console.log(`✅ Found validated code snippet in full file at line ${lineNumber}`);
             return lineNumber;
           }
@@ -648,7 +671,7 @@ CRITICAL REQUIREMENTS:
         const matchingKeywords = keywords.filter((keyword: string) => line.includes(keyword));
         if (matchingKeywords.length > 0) {
           const lineNumber = diffAnalysis.addedLines[i];
-          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
             console.log(`✅ Found validated keyword match in changed content at line ${lineNumber} (keywords: ${matchingKeywords.join(', ')})`);
             return lineNumber;
           }
@@ -667,7 +690,7 @@ CRITICAL REQUIREMENTS:
         const matchingKeywords = keywords.filter((keyword: string) => line.includes(keyword));
         if (matchingKeywords.length > 0) {
           const lineNumber = i + 1;
-          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+          if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
             console.log(`✅ Found validated keyword match in full file at line ${lineNumber} (keywords: ${matchingKeywords.join(', ')})`);
             return lineNumber;
           }
@@ -698,7 +721,7 @@ CRITICAL REQUIREMENTS:
             line.includes('log.') // Various logging frameworks
           )) {
             const lineNumber = i + 1;
-            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
               console.log(`✅ Found validated logging line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
               return lineNumber;
             }
@@ -713,7 +736,7 @@ CRITICAL REQUIREMENTS:
             line.includes('https')
           )) {
             const lineNumber = i + 1;
-            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
               console.log(`✅ Found validated endpoint-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
               return lineNumber;
             }
@@ -728,7 +751,7 @@ CRITICAL REQUIREMENTS:
             line.includes('password')
           )) {
             const lineNumber = i + 1;
-            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
               console.log(`✅ Found validated API key-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
               return lineNumber;
             }
@@ -749,7 +772,7 @@ CRITICAL REQUIREMENTS:
             line.includes('private ') // Java/C# methods
           )) {
             const lineNumber = i + 1;
-            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent)) {
+            if (this.validateLineNumberForIssue(issue, lineNumber, fileContent, diffAnalysis.addedLines)) {
               console.log(`✅ Found validated syntax-related line at ${lineNumber}: ${lines[i].substring(0, 50)}...`);
               return lineNumber;
             }
@@ -764,17 +787,23 @@ CRITICAL REQUIREMENTS:
     return 0;
   }
 
-  private validateLineNumberForIssue(issue: any, lineNumber: number, fileContent: string): boolean {
+  private validateLineNumberForIssue(issue: any, lineNumber: number, fileContent: string, changedLines: number[]): boolean {
     if (!lineNumber || lineNumber <= 0) return false;
     
     const lines = fileContent.split('\n');
     if (lineNumber > lines.length) return false;
     
+    // CRITICAL: Check if the line number is actually in the changed lines
+    if (!changedLines.includes(lineNumber)) {
+      console.log(`❌ Line ${lineNumber} is NOT in the changed lines. Changed lines: ${changedLines.join(', ')}`);
+      return false;
+    }
+    
     const line = lines[lineNumber - 1];
     const description = issue.description?.toLowerCase() || '';
     const codeSnippet = issue.code_snippet?.toLowerCase() || '';
     
-    console.log(`🔍 Validating line ${lineNumber} for issue:`, {
+    console.log(`🔍 Validating line ${lineNumber} for issue (line is in changed lines):`, {
       type: issue.type,
       description: description.substring(0, 50),
       codeSnippet: codeSnippet.substring(0, 50),
@@ -849,16 +878,29 @@ CRITICAL REQUIREMENTS:
     // Parse the diff to extract line numbers and changes
     const diffAnalysis = this.analyzeDiff(state.file_diff || '');
 
-    const securityPrompt = `Perform a security analysis of the following code:
+    // Create a focused context with ONLY the changed lines for security analysis
+    const changedLinesContext = diffAnalysis.changedContent.map((line, index) => {
+      const lineNumber = diffAnalysis.addedLines[index];
+      return `Line ${lineNumber}: ${line}`;
+    }).join('\n');
+
+    const securityPrompt = `Perform a security analysis of ONLY the following changed lines from a Pull Request.
 
 File: ${state.current_file}
-Code: ${state.file_content}
-File Diff: ${state.file_diff}
 
-CHANGED LINES IN THIS PR:
-${diffAnalysis.changedContent.map((line, index) => `Line ${diffAnalysis.addedLines[index]}: ${line}`).join('\n')}
+CHANGED LINES ONLY (these are the ONLY lines you can analyze):
+${changedLinesContext}
 
-CRITICAL: Look for these OBVIOUS security problems first:
+IMPORTANT: You are ONLY seeing the changed lines. Do NOT assume there is other code in the file.
+
+CRITICAL RULES - READ CAREFULLY:
+1. YOU CAN ONLY ANALYZE THE LINES LISTED ABOVE - these are the ONLY lines that were changed
+2. DO NOT analyze any other lines in the file, even if they have security issues
+3. If the changed lines don't have any security issues, return an empty security_issues array
+4. Focus ONLY on security problems in the actual changes made
+5. Use the EXACT line numbers provided above
+
+CRITICAL: Look for these OBVIOUS security problems in the CHANGED LINES ONLY:
 1. HARDCODED SECRETS - API keys, passwords, tokens in plain text
 2. LOGGING SENSITIVE DATA - console.log with secrets, API keys, user data
 3. INSECURE AUTHENTICATION - missing validation, weak checks
@@ -868,10 +910,11 @@ CRITICAL: Look for these OBVIOUS security problems first:
 
 IMPORTANT INSTRUCTIONS:
 1. ONLY analyze code that was actually CHANGED in this PR (the lines shown above)
-2. Use the EXACT line numbers from the modified file (right side of diff)
+2. Use the EXACT line numbers from the changed lines list
 3. Focus on security issues in the specific changes made
 4. Provide relevant security recommendations that match the actual code being changed
 5. PRIORITIZE obvious security vulnerabilities over minor issues
+6. If no security issues are found in the changed lines, return empty security_issues array
 
 Look for security vulnerabilities in the CHANGED code including:
 1. Hardcoded secrets and credentials
@@ -885,7 +928,7 @@ Look for security vulnerabilities in the CHANGED code including:
 9. Prompt injection vulnerabilities
 10. Input sanitization issues
 
-For each security issue, provide the EXACT line number from the modified file where the vulnerability occurs.
+For each security issue, provide the EXACT line number from the changed lines list where the vulnerability occurs.
 
 CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
 
@@ -924,17 +967,21 @@ CRITICAL REQUIREMENTS:
       if (securityAnalysis.security_issues && Array.isArray(securityAnalysis.security_issues)) {
         securityAnalysis.security_issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
-            // Try to find the best line number for this security issue
-            const bestLineNumber = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
-            
-            state.review_comments.push({
-              file: state.current_file || "unknown",
-              line: bestLineNumber,
-              comment: `SECURITY: ${issue.description}`,
-              type: "security",
-              confidence: issue.confidence,
-              suggestion: issue.recommendation
-            });
+            // CRITICAL: Only process security issues that have line numbers in the changed lines
+            if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
+              console.log(`✅ Security issue line ${issue.line_number} is in changed lines - processing`);
+              
+              state.review_comments.push({
+                file: state.current_file || "unknown",
+                line: issue.line_number,
+                comment: `SECURITY: ${issue.description}`,
+                type: "security",
+                confidence: issue.confidence,
+                suggestion: issue.recommendation
+              });
+            } else {
+              console.log(`❌ Security issue line ${issue.line_number} is NOT in changed lines (${diffAnalysis.addedLines.join(', ')}) - SKIPPING`);
+            }
           }
         });
       }
@@ -1036,13 +1083,14 @@ Provide a final recommendation in JSON format:
         confidence: 0.7
       });
       
-      // Add final assessment to state
-      state.review_comments.push({
-        file: "FINAL_ASSESSMENT",
-        comment: `Final Assessment: ${finalAssessment.overall_assessment}\n\n${finalAssessment.summary}\n\nKey Issues: ${finalAssessment.key_issues}\n\nRecommendations: ${finalAssessment.recommendations}`,
-        type: "improvement",
+      // Store final assessment in state for summary generation (not as a comment)
+      state.final_assessment = {
+        overall_assessment: finalAssessment.overall_assessment,
+        summary: finalAssessment.summary,
+        key_issues: finalAssessment.key_issues,
+        recommendations: finalAssessment.recommendations,
         confidence: finalAssessment.confidence
-      });
+      };
 
       state.llm_calls = this.llmCalls;
       return state;
