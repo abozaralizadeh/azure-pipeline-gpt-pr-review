@@ -314,6 +314,15 @@ Respond with JSON:
       return `Line ${lineNumber}: ${line}`;
     }).join('\n');
 
+    console.log(`🔍 Changed lines context for AI:`);
+    console.log(changedLinesContext);
+
+    // If no changed lines, skip the review
+    if (diffAnalysis.changedContent.length === 0) {
+      console.log(`⏭️ No changed lines found in diff, skipping review for ${state.current_file}`);
+      return state;
+    }
+
     const reviewPrompt = `You are an expert code reviewer. Analyze ONLY the following changed lines from a Pull Request.
 
 File: ${state.current_file}
@@ -498,6 +507,8 @@ CRITICAL REQUIREMENTS:
     }
 
     console.log(`✅ Diff analysis complete: ${addedLines.length} added, ${removedLines.length} removed, ${changedContent.length} changed content lines`);
+    console.log(`📝 Added lines: ${addedLines.join(', ')}`);
+    console.log(`📝 Changed content: ${changedContent.map((line, i) => `Line ${addedLines[i]}: ${line}`).join('\n')}`);
     return { addedLines, removedLines, modifiedLines, changedContent };
   }
 
@@ -883,6 +894,15 @@ CRITICAL REQUIREMENTS:
       const lineNumber = diffAnalysis.addedLines[index];
       return `Line ${lineNumber}: ${line}`;
     }).join('\n');
+
+    console.log(`🔍 Security scan - Changed lines context for AI:`);
+    console.log(changedLinesContext);
+
+    // If no changed lines, skip the security scan
+    if (diffAnalysis.changedContent.length === 0) {
+      console.log(`⏭️ No changed lines found in diff, skipping security scan for ${state.current_file}`);
+      return state;
+    }
 
     const securityPrompt = `Perform a security analysis of ONLY the following changed lines from a Pull Request.
 
