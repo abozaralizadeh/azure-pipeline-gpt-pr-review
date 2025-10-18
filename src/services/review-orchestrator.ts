@@ -313,14 +313,18 @@ export class ReviewOrchestrator {
     
     for (const result of reviewResults) {
       console.log(`🔍 Processing review result with ${result.review_comments.length} comments`);
-      
+
       for (const comment of result.review_comments) {
-        console.log(`🔍 Processing comment: ${comment.type} for ${comment.file} at line ${comment.line}`);
-        
+        // Normalize logging for missing lines
+        const lineDisplay = comment.line ?? 'N/A';
+
+        // If this is a PR-level comment, skip inline posting and let summary handle it
         if (comment.file === 'PR_CONTEXT') {
-          console.log(`⏭️ Skipping context comment`);
-          continue; // Skip context comments
+          console.log(`🔍 Skipping PR-level comment (summary context): type=${comment.type} file=${comment.file} line=${lineDisplay}`);
+          continue; // Skip inline posting for PR-level comments
         }
+
+        console.log(`🔍 Processing comment: ${comment.type} for ${comment.file} at line ${lineDisplay}`);
 
         // Check if this is a fixed issue - if so, we might want to continue the thread
         if (comment.is_fixed) {
@@ -328,7 +332,7 @@ export class ReviewOrchestrator {
         } else {
           // Check if similar comment already exists
           if (this.isDuplicateComment(comment, existingComments)) {
-            console.log(`📝 Similar comment already exists for ${comment.file} at line ${comment.line}, skipping`);
+            console.log(`📝 Similar comment already exists for ${comment.file} at line ${lineDisplay}, skipping`);
             continue;
           }
         }
@@ -389,31 +393,42 @@ export class ReviewOrchestrator {
   }
 
   private isDuplicateComment(newComment: any, existingComments: any[]): boolean {
-    if (!newComment.file || !newComment.line) return false;
-    
+    // Only consider inline comments for duplicate detection
+    if (!newComment.file || typeof newComment.line !== 'number' || newComment.line <= 0) return false;
+
+    const normalizedNewFile = newComment.file.startsWith('/') ? newComment.file : '/' + newComment.file;
+
     return existingComments.some(existingComment => {
       if (!existingComment.content) return false;
-      
+
+      // Normalize existing thread path if present
+      const existingPath = existingComment.threadContext?.filePath;
+      const normalizedExistingFile = existingPath ? (existingPath.startsWith('/') ? existingPath : '/' + existingPath) : null;
+
       // Check if it's the same file and line
-      const isSameLocation = existingComment.threadContext?.filePath === newComment.file &&
-                            (existingComment.threadContext?.rightFileStart?.line === newComment.line ||
-                             existingComment.threadContext?.rightFileEnd?.line === newComment.line);
-      
+      const isSameLocation = normalizedExistingFile === normalizedNewFile &&
+                             (existingComment.threadContext?.rightFileStart?.line === newComment.line ||
+                              existingComment.threadContext?.rightFileEnd?.line === newComment.line ||
+                              existingComment.threadContext?.leftFileStart?.line === newComment.line ||
+                              existingComment.threadContext?.leftFileEnd?.line === newComment.line);
+
       if (!isSameLocation) return false;
-      
-      // Check if it's a similar type of issue
-      const newType = newComment.type?.toLowerCase() || '';
-      const existingContent = existingComment.content.toLowerCase();
-      
+
+      // Compare content similarity using normalized lowercase
+      const newType = (newComment.type || '').toString().toLowerCase();
+      const existingContent = existingComment.content.toString().toLowerCase();
+
       const isSimilarType = existingContent.includes(newType) ||
-                           (newType === 'security' && existingContent.includes('security')) ||
-                           (newType === 'bug' && existingContent.includes('bug')) ||
-                           (newType === 'improvement' && existingContent.includes('improvement'));
-      
-      // Check if the comment is from our build service and not resolved
-      const isFromBuildService = existingComment.author?.displayName?.includes('Build Service');
+                            (newType === 'security' && existingContent.includes('security')) ||
+                            (newType === 'bug' && existingContent.includes('bug')) ||
+                            (newType === 'improvement' && existingContent.includes('improvement'));
+
+      // Prefer identity by uniqueName if available; fallback to displayName containing 'Build Service'
+      const isFromBuildService = existingComment.author?.uniqueName?.toLowerCase()?.includes('build') ||
+                                 existingComment.author?.displayName?.toLowerCase()?.includes('build service');
+
       const isNotResolved = !existingComment.isDeleted && existingComment.status !== 'resolved';
-      
+
       return isSameLocation && isSimilarType && isFromBuildService && isNotResolved;
     });
   }

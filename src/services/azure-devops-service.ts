@@ -64,6 +64,7 @@ export class AzureDevOpsService {
   private collectionUri: string;
   private projectId: string;
   private repositoryName: string;
+  private repositoryId: string;
   private pullRequestId: string;
   private accessToken: string;
   private httpsAgent: Agent;
@@ -71,17 +72,19 @@ export class AzureDevOpsService {
   constructor(httpsAgent: Agent) {
     this.collectionUri = tl.getVariable('SYSTEM.TEAMFOUNDATIONCOLLECTIONURI') || '';
     this.projectId = tl.getVariable('SYSTEM.TEAMPROJECT') || ''; // Use friendly name instead of GUID
-    this.repositoryName = tl.getVariable('Build.Repository.Name') || '';
+  this.repositoryName = tl.getVariable('Build.Repository.Name') || '';
+  this.repositoryId = tl.getVariable('Build.Repository.ID') || '';
     this.pullRequestId = tl.getVariable('System.PullRequest.PullRequestId') || '';
     this.accessToken = tl.getVariable('SYSTEM.ACCESSTOKEN') || '';
     this.httpsAgent = httpsAgent;
     
     // Enhanced debugging for troubleshooting
-    console.log(`🔧 Azure DevOps Service initialized with:`);
-    console.log(`  - Collection URI: "${this.collectionUri}"`);
-    console.log(`  - Project ID: "${this.projectId}"`);
-    console.log(`  - Repository Name: "${this.repositoryName}"`);
-    console.log(`  - Pull Request ID: "${this.pullRequestId}"`);
+  // Avoid logging sensitive tokens
+  console.log(`🔧 Azure DevOps Service initialized with:`);
+  console.log(`  - Collection URI: "${this.collectionUri}"`);
+  console.log(`  - Project ID: "${this.projectId}"`);
+  console.log(`  - Repository Name: "${this.repositoryName}"`);
+  console.log(`  - Pull Request ID: "${this.pullRequestId}"`);
     
     // Debug all available variables
     console.log(`🔍 Debug - All available variables:`);
@@ -99,7 +102,9 @@ export class AzureDevOpsService {
     
     allVars.forEach(varName => {
       const value = tl.getVariable(varName);
-      console.log(`  - ${varName}: "${value}"`);
+      // Mask access token values to avoid accidental leakage
+      const masked = varName === 'SYSTEM.ACCESSTOKEN' && value ? `${value.substring(0, 6)}...[masked]` : value;
+      console.log(`  - ${varName}: "${masked}"`);
     });
     
     // Try alternative PR ID sources
@@ -133,13 +138,46 @@ export class AzureDevOpsService {
       console.error(`❌ Missing SYSTEM.ACCESSTOKEN`);
     }
     
-    // Test URL construction
-    const testUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}`;
+    // Test URL construction (use repo id if available)
+    const repoIdentifier = this.repositoryId || this.repositoryName || '<repo-unknown>';
+    const testUrl = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}/_apis/git/repositories/${repoIdentifier}/pullRequests/${this.pullRequestId}`;
     console.log(`🔍 Base URL: "${testUrl}"`);
   }
 
   private getApiUrl(endpoint: string): string {
-    return `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}${endpoint}?api-version=7.0`;
+    const repoIdentifier = this.repositoryId || this.repositoryName;
+    const base = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}`;
+    const repoPart = repoIdentifier ? `/repositories/${encodeURIComponent(repoIdentifier)}` : '';
+    return `${base}/_apis/git${repoPart}/pullRequests/${this.pullRequestId}${endpoint}?api-version=7.0`;
+  }
+
+  private getAuthHeaders(): { [key: string]: string } {
+    // Prefer system access token (pipeline OAuth token)
+    if (this.accessToken) {
+      return {
+        'Authorization': `Bearer ${this.accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+    }
+
+    // Try common env var or pipeline variable for PAT (if user provided)
+    const pat = tl.getInput('azure_devops_pat', false) || process.env['AZURE_DEVOPS_EXT_PAT'] || process.env['AZURE_DEVOPS_PAT'];
+    if (pat) {
+      // Azure DevOps PATs are usually sent as Basic with empty username
+      const basic = Buffer.from(':' + pat).toString('base64');
+      return {
+        'Authorization': `Basic ${basic}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+    }
+
+    // Last resort: no auth - caller should handle missing token
+    return {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    };
   }
 
   public async getPullRequestDetails(): Promise<PRDetails> {
@@ -153,10 +191,7 @@ export class AzureDevOpsService {
     console.log(`🔍 Fetching PR details from: ${url}`);
     
     const response = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       agent: this.httpsAgent
     });
 
@@ -170,6 +205,37 @@ export class AzureDevOpsService {
     const prDetails = await response.json();
     console.log(`✅ Successfully fetched PR details: ID=${prDetails.id}, Title="${prDetails.title}"`);
     return prDetails;
+  }
+
+  public async getLatestPRIteration(): Promise<any | null> {
+    try {
+      if (!this.pullRequestId) return null;
+      const url = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}/_apis/git/repositories/${this.repositoryId || this.repositoryName}/pullRequests/${this.pullRequestId}/iterations?api-version=7.0`;
+      console.log(`🔍 Fetching PR iterations from: ${url}`);
+
+      const response = await fetch(url, {
+        headers: this.getAuthHeaders(),
+        agent: this.httpsAgent
+      });
+
+      if (!response.ok) {
+        console.log(`⚠️ Failed to fetch PR iterations: ${response.status} ${response.statusText}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const iterations = data.value || [];
+      if (iterations.length === 0) return null;
+
+      // Return the last iteration (highest id)
+      iterations.sort((a: any, b: any) => (a.id || 0) - (b.id || 0));
+      const latest = iterations[iterations.length - 1];
+      console.log(`🔍 Found ${iterations.length} iterations, latest id=${latest.id}, changeTrackingId=${latest.changeTrackingId || 'N/A'}`);
+      return latest;
+    } catch (error) {
+      console.log(`⚠️ Error fetching PR iterations:`, error instanceof Error ? error.message : String(error));
+      return null;
+    }
   }
 
   private async tryToGetPRIdFromRepository(): Promise<void> {
@@ -188,10 +254,7 @@ export class AzureDevOpsService {
       console.log(`🔍 PRs URL: ${prsUrl}`);
       
       const response = await fetch(prsUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
 
@@ -233,10 +296,7 @@ export class AzureDevOpsService {
       console.log(`🔍 Changes URL: ${changesUrl}`);
       
       const response = await fetch(changesUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
 
@@ -361,10 +421,7 @@ export class AzureDevOpsService {
       try {
         console.log(`🔍 Trying approach: ${approach.name}`);
         const response = await fetch(approach.url, {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          },
+          headers: this.getAuthHeaders(),
           agent: this.httpsAgent
         });
 
@@ -415,10 +472,7 @@ export class AzureDevOpsService {
       const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
       
       const response = await fetch(diffUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -478,10 +532,7 @@ export class AzureDevOpsService {
       const sourceCommitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/commits?searchCriteria.itemVersion.version=${sourceBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
       
       const sourceResponse = await fetch(sourceCommitsUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -502,10 +553,7 @@ export class AzureDevOpsService {
           const targetCommitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/commits?searchCriteria.itemVersion.version=${targetBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
           
           const targetResponse = await fetch(targetCommitsUrl, {
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Content-Type': 'application/json'
-            },
+            headers: this.getAuthHeaders(),
             agent: this.httpsAgent
           });
           
@@ -526,10 +574,7 @@ export class AzureDevOpsService {
               const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetCommitId}&targetVersion=${sourceCommitId}&api-version=7.0`;
               
               const diffResponse = await fetch(diffUrl, {
-                headers: {
-                  'Authorization': `Bearer ${this.accessToken}`,
-                  'Content-Type': 'application/json'
-                },
+                headers: this.getAuthHeaders(),
                 agent: this.httpsAgent
               });
               
@@ -746,10 +791,7 @@ export class AzureDevOpsService {
       console.log(`🔍 Branch diff URL: ${diffUrl}`);
       
       const response = await fetch(diffUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -805,10 +847,7 @@ export class AzureDevOpsService {
         console.log(`🔍 Repository ID diff URL: ${diffUrl}`);
         
         const response = await fetch(diffUrl, {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          },
+          headers: this.getAuthHeaders(),
           agent: this.httpsAgent
         });
         
@@ -867,10 +906,7 @@ export class AzureDevOpsService {
         console.log(`🔍 Commits URL: ${commitsUrl}`);
         
         const response = await fetch(commitsUrl, {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          },
+          headers: this.getAuthHeaders(),
           agent: this.httpsAgent
         });
         
@@ -888,10 +924,7 @@ export class AzureDevOpsService {
             // Get changes for this commit
             const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/commits/${commitId}/changes?api-version=7.0`;
             const changesResponse = await fetch(changesUrl, {
-              headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-              },
+              headers: this.getAuthHeaders(),
               agent: this.httpsAgent
             });
             
@@ -939,10 +972,7 @@ export class AzureDevOpsService {
       const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&api-version=7.0`;
       
       const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
 
@@ -971,10 +1001,7 @@ export class AzureDevOpsService {
     console.log(`🔍 File content URL: ${url}`);
     
     const response = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       agent: this.httpsAgent
     });
 
@@ -1049,12 +1076,9 @@ export class AzureDevOpsService {
       console.log(`🔍 Diff URL: ${diffUrl}`);
       
       const response = await fetch(diffUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        agent: this.httpsAgent
-      });
+          headers: this.getAuthHeaders(),
+          agent: this.httpsAgent
+        });
 
       if (response.ok) {
         const diff = await response.json();
@@ -1102,10 +1126,7 @@ export class AzureDevOpsService {
       const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
       
       const response = await fetch(diffUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
 
@@ -1124,10 +1145,7 @@ export class AzureDevOpsService {
           const fileDiffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&versionDescriptor.version=${sourceBranch}&api-version=7.0&includeContent=true&$format=text`;
           
           const fileResponse = await fetch(fileDiffUrl, {
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Content-Type': 'text/plain'
-            },
+            headers: Object.assign({}, this.getAuthHeaders(), { 'Content-Type': 'text/plain' }),
             agent: this.httpsAgent
           });
 
@@ -1237,19 +1255,50 @@ export class AzureDevOpsService {
 
   public async addComment(comment: PRComment): Promise<void> {
     const url = this.getApiUrl('/threads');
-    
-    const body = {
+    // Best-effort: try to include pullRequestThreadContext (iteration/changeTrackingId) if available
+    let pullRequestThreadContext: any = undefined;
+    try {
+      const latestIteration = await this.getLatestPRIteration();
+      if (latestIteration) {
+        pullRequestThreadContext = {
+          iterationContext: {
+            changeTrackingId: latestIteration.changeTrackingId || latestIteration.id
+          }
+        };
+      }
+    } catch (e) {
+      // ignore - best-effort only
+    }
+
+    const body: any = {
       comments: [comment],
       status: 1,
       threadContext: comment.threadContext
     };
 
+    // If we have iteration info and the comment has threadContext (file ranges),
+    // copy those range fields into pullRequestThreadContext so Azure DevOps can
+    // anchor the thread to the correct file & iteration precisely.
+    if (pullRequestThreadContext) {
+      if (comment.threadContext) {
+        const tc = comment.threadContext as any;
+        const extendedPRThreadContext = Object.assign({}, pullRequestThreadContext);
+
+        if (tc.filePath) extendedPRThreadContext.filePath = tc.filePath;
+        if (tc.rightFileStart) extendedPRThreadContext.rightFileStart = tc.rightFileStart;
+        if (tc.rightFileEnd) extendedPRThreadContext.rightFileEnd = tc.rightFileEnd;
+        if (tc.leftFileStart) extendedPRThreadContext.leftFileStart = tc.leftFileStart;
+        if (tc.leftFileEnd) extendedPRThreadContext.leftFileEnd = tc.leftFileEnd;
+
+        body.pullRequestThreadContext = extendedPRThreadContext;
+      } else {
+        body.pullRequestThreadContext = pullRequestThreadContext;
+      }
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       body: JSON.stringify(body),
       agent: this.httpsAgent
     });
@@ -1319,10 +1368,7 @@ export class AzureDevOpsService {
     const url = this.getApiUrl('/threads');
     
     const response = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       agent: this.httpsAgent
     });
 
@@ -1339,10 +1385,7 @@ export class AzureDevOpsService {
     
     const response = await fetch(url, {
       method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       agent: this.httpsAgent
     });
 
@@ -1400,10 +1443,7 @@ export class AzureDevOpsService {
 
     const response = await fetch(url, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       body: JSON.stringify(body),
       agent: this.httpsAgent
     });
@@ -1426,10 +1466,7 @@ export class AzureDevOpsService {
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: this.getAuthHeaders(),
       body: JSON.stringify(body),
       agent: this.httpsAgent
     });
@@ -1477,10 +1514,7 @@ export class AzureDevOpsService {
       // Test if we can access the repository
       const repoUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}?api-version=7.0`;
       const repoResponse = await fetch(repoUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -1495,12 +1529,9 @@ export class AzureDevOpsService {
       const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}/changes?api-version=7.0`;
       
       const changesResponse = await fetch(changesUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        agent: this.httpsAgent
-      });
+              headers: this.getAuthHeaders(),
+              agent: this.httpsAgent
+            });
       
       if (changesResponse.ok) {
         const changesData = await changesResponse.json();
@@ -1524,10 +1555,7 @@ export class AzureDevOpsService {
       const baseUrl = this.collectionUri.replace('/_apis', '');
       
       const response = await fetch(baseUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -1546,10 +1574,7 @@ export class AzureDevOpsService {
       const projectUrl = `${this.collectionUri}${this.projectId}/_apis/project?api-version=7.0`;
       
       const response = await fetch(projectUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -1573,10 +1598,7 @@ export class AzureDevOpsService {
       const correctedPrUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}`;
       
       const response = await fetch(correctedPrUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       
@@ -1596,10 +1618,7 @@ export class AzureDevOpsService {
       const correctedChangesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}/changes?api-version=7.0`;
       
       const changesResponse = await fetch(correctedChangesUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
       

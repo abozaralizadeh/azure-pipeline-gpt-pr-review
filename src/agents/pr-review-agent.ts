@@ -413,10 +413,10 @@ CRITICAL REQUIREMENTS:
       if (review.issues && Array.isArray(review.issues)) {
         review.issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
-            // CRITICAL: Only process issues that have line numbers in the changed lines
+            // If the issue contains a valid changed-line number, add it as an inline comment
             if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
               console.log(`✅ Issue line ${issue.line_number} is in changed lines - processing`);
-              
+
               state.review_comments.push({
                 file: state.current_file || "unknown",
                 line: issue.line_number,
@@ -427,7 +427,19 @@ CRITICAL REQUIREMENTS:
                 is_new_issue: issue.is_new_issue !== false // Default to true if not specified
               });
             } else {
-              console.log(`❌ Issue line ${issue.line_number} is NOT in changed lines (${diffAnalysis.addedLines.join(', ')}) - SKIPPING`);
+              // Instead of silently skipping issues that don't have a valid changed-line,
+              // convert them into a PR-level summary comment so they are still visible to the reviewer.
+              console.log(`⚠️ Issue missing or outside changed lines: creating PR-level summary (issue line: ${issue.line_number})`);
+
+              state.review_comments.push({
+                file: "PR_CONTEXT",
+                // leave line undefined for PR-level comments
+                comment: `ISSUE (no valid changed-line): ${issue.description}`,
+                type: issue.type,
+                confidence: issue.confidence,
+                suggestion: issue.suggestion,
+                is_new_issue: issue.is_new_issue !== false
+              });
             }
           }
         });
@@ -436,14 +448,25 @@ CRITICAL REQUIREMENTS:
       // Add fixed issues as positive feedback
       if (review.fixed_issues && Array.isArray(review.fixed_issues)) {
         review.fixed_issues.forEach((fixedIssue: any) => {
-          state.review_comments.push({
-            file: state.current_file || "unknown",
-            line: fixedIssue.line_number,
-            comment: `✅ FIXED: ${fixedIssue.description}\n\n${fixedIssue.fix_description}`,
-            type: "improvement",
-            confidence: 0.9,
-            is_fixed: true
-          });
+          if (fixedIssue.line_number && diffAnalysis.addedLines.includes(fixedIssue.line_number)) {
+            state.review_comments.push({
+              file: state.current_file || "unknown",
+              line: fixedIssue.line_number,
+              comment: `✅ FIXED: ${fixedIssue.description}\n\n${fixedIssue.fix_description}`,
+              type: "improvement",
+              confidence: 0.9,
+              is_fixed: true
+            });
+          } else {
+            // Create PR-level positive feedback if no valid inline location
+            state.review_comments.push({
+              file: "PR_CONTEXT",
+              comment: `✅ FIXED (PR-level): ${fixedIssue.description} - ${fixedIssue.fix_description}`,
+              type: "improvement",
+              confidence: 0.9,
+              is_fixed: true
+            });
+          }
         });
       }
 
