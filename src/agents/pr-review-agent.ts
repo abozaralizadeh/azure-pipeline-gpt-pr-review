@@ -66,6 +66,7 @@ export class AdvancedPRReviewAgent {
   private maxLLMCalls: number;
   private reviewThreshold: number;
   private llmCalls: number = 0;
+  private verbose: boolean = true;
 
   constructor(
     azureOpenAIEndpoint: string,
@@ -79,6 +80,13 @@ export class AdvancedPRReviewAgent {
     this.deploymentName = deploymentName;
     this.maxLLMCalls = maxLLMCalls;
     this.reviewThreshold = reviewThreshold;
+    // Verbose logging: default enabled unless explicitly disabled by ADVPR_VERBOSE=0
+    try {
+      const envVal = tl.getVariable('ADVPR_VERBOSE');
+      this.verbose = !(envVal === '0' || process.env['ADVPR_VERBOSE'] === '0');
+    } catch (e) {
+      this.verbose = true;
+    }
   }
 
   public async runReview(
@@ -122,26 +130,45 @@ export class AdvancedPRReviewAgent {
     }
 
     try {
-      const response = await fetch(`${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}/chat/completions?api-version=2024-02-15-preview`, {
+      const url = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}/chat/completions?api-version=2024-02-15-preview`;
+      const payload = {
+        messages: [
+          {
+            role: "system",
+            content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+          },
+          {
+            role: "user",
+            content: prompt
+          }
+        ],
+        max_tokens: 4000,
+        temperature: 0.1
+      };
+
+      // Safe debug logging (do not print secrets)
+      try {
+        if (this.verbose) {
+          const userMsg = (payload.messages.find((m: any) => m.role === 'user') || {}).content || '';
+          console.log('🔎 OpenAI request summary:');
+          console.log(`  - URL: ${url}`);
+          console.log(`  - Deployment: ${this.deploymentName}`);
+          console.log(`  - Messages: ${payload.messages.length}`);
+          console.log(`  - Prompt length: ${userMsg.length} chars`);
+          console.log(`  - Prompt preview (first 600 chars):\n${userMsg.substring(0, 600)}`);
+          if (userMsg.length > 600) console.log(`  - Prompt tail preview (last 200 chars):\n${userMsg.substring(userMsg.length - 200)}`);
+        }
+      } catch (logErr) {
+        console.log('⚠️ Failed to log OpenAI request summary', logErr);
+      }
+
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'api-key': this.azureOpenAIKey
         },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: "system",
-              content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
-            },
-            {
-              role: "user",
-              content: prompt
-            }
-          ],
-          max_tokens: 4000,
-          temperature: 0.1
-        })
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) {
@@ -150,11 +177,22 @@ export class AdvancedPRReviewAgent {
 
       const data = await response.json() as any;
       this.llmCalls++;
-      const content = data.choices[0].message.content;
-      
-      // Log the raw response for debugging
-      console.log(`🔍 Raw AI response (first 200 chars): ${content.substring(0, 200)}`);
-      
+      const content = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
+
+      try {
+        if (this.verbose) {
+          const choicesCount = Array.isArray(data.choices) ? data.choices.length : 0;
+          console.log('🔍 OpenAI response summary:');
+          console.log(`  - HTTP status: ${response.status}`);
+          console.log(`  - Choices: ${choicesCount}`);
+          console.log(`  - Response length: ${content ? content.length : 0} chars`);
+          if (content) console.log(`  - Response preview (first 600 chars):\n${content.substring(0, 600)}`);
+          if (content && content.length > 600) console.log(`  - Response tail preview (last 200 chars):\n${content.substring(content.length - 200)}`);
+        }
+      } catch (logErr) {
+        console.log('⚠️ Failed to log OpenAI response summary', logErr);
+      }
+
       return content;
     } catch (error) {
       console.error("Error calling Azure OpenAI:", error);
@@ -330,7 +368,10 @@ File: ${state.current_file}
 CHANGED LINES ONLY (these are the ONLY lines you can comment on):
 ${changedLinesContext}
 
-IMPORTANT: You are ONLY seeing the changed lines. Do NOT assume there is other code in the file.
+FULL FILE CONTEXT (for reference only):
+${state.file_content}
+
+IMPORTANT: You are ONLY seeing the changed lines as the primary source for comments. Use the FULL FILE CONTEXT only to disambiguate snippets — DO NOT invent new issues outside the changed lines.
 
 CRITICAL RULES - READ CAREFULLY:
 1. YOU CAN ONLY COMMENT ON THE LINES LISTED ABOVE - these are the ONLY lines that were changed

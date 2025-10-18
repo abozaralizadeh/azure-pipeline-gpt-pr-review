@@ -180,6 +180,73 @@ export class AzureDevOpsService {
     };
   }
 
+  // Mask sensitive header values for logging
+  private maskHeaders(headers: any): any {
+    if (!headers) return headers;
+    try {
+      const copy: any = {};
+      for (const k of Object.keys(headers)) {
+        const lk = k.toLowerCase();
+        const v = headers[k];
+        if (!v) { copy[k] = v; continue; }
+        if (lk === 'authorization' || lk === 'api-key' || lk.includes('token') || lk.includes('secret') || lk.includes('pat')) {
+          const s = v.toString();
+          copy[k] = s.length > 8 ? `${s.substring(0,6)}...[masked]` : '[masked]';
+        } else {
+          copy[k] = v;
+        }
+      }
+      return copy;
+    } catch (e) {
+      return headers;
+    }
+  }
+
+  // Wrapper around fetch with basic retry and masked logging for failures
+  private async safeFetch(url: string, options: any = {}, retries: number = 1): Promise<any> {
+    // Ensure agent is present
+    options = Object.assign({}, options);
+    if (!options.agent) options.agent = this.httpsAgent;
+
+    try {
+      const response = await fetch(url, options);
+
+      if (!response.ok) {
+        // Try to read response body but guard against very large content
+        let bodyPreview = '';
+        try {
+          const text = await response.text();
+          if (text && text.length > 2000) bodyPreview = text.substring(0, 2000) + '...[truncated]';
+          else bodyPreview = text;
+        } catch (e) {
+          bodyPreview = '<could not read response body>';
+        }
+
+        console.error(`❌ API request failed: ${response.status} ${response.statusText} - ${url}`);
+        console.error(`   - Response preview: ${bodyPreview}`);
+        try { console.error(`   - Request headers: ${JSON.stringify(this.maskHeaders(options.headers || {}))}`); } catch(e) {}
+
+        if (retries > 0) {
+          const waitMs = 500 * (2 - retries + 1);
+          console.log(`🔁 Retrying request in ${waitMs}ms... (${retries} retries left)`);
+          await new Promise(r => setTimeout(r, waitMs));
+          return this.safeFetch(url, options, retries - 1);
+        }
+      }
+
+      return response;
+    } catch (err: any) {
+      console.error(`❌ Network error while fetching ${url}:`, err && err.message ? err.message : err);
+      try { console.error(`   - Request headers: ${JSON.stringify(this.maskHeaders(options.headers || {}))}`); } catch(e) {}
+      if (retries > 0) {
+        console.log(`🔁 Retrying after network error... (${retries} retries left)`);
+        await new Promise(r => setTimeout(r, 500));
+        return this.safeFetch(url, options, retries - 1);
+      }
+      throw err;
+    }
+  }
+
   public async getPullRequestDetails(): Promise<PRDetails> {
     // If we don't have a PR ID, try to get it from the repository
     if (!this.pullRequestId) {
@@ -190,9 +257,8 @@ export class AzureDevOpsService {
     const url = this.getApiUrl('');
     console.log(`🔍 Fetching PR details from: ${url}`);
     
-    const response = await fetch(url, {
-      headers: this.getAuthHeaders(),
-      agent: this.httpsAgent
+    const response = await this.safeFetch(url, {
+      headers: this.getAuthHeaders()
     });
 
     if (!response.ok) {
@@ -213,9 +279,8 @@ export class AzureDevOpsService {
       const url = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}/_apis/git/repositories/${this.repositoryId || this.repositoryName}/pullRequests/${this.pullRequestId}/iterations?api-version=7.0`;
       console.log(`🔍 Fetching PR iterations from: ${url}`);
 
-      const response = await fetch(url, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const response = await this.safeFetch(url, {
+        headers: this.getAuthHeaders()
       });
 
       if (!response.ok) {
@@ -253,9 +318,8 @@ export class AzureDevOpsService {
       const prsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/pullRequests?api-version=7.0&status=active`;
       console.log(`🔍 PRs URL: ${prsUrl}`);
       
-      const response = await fetch(prsUrl, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const response = await this.safeFetch(prsUrl, {
+        headers: this.getAuthHeaders()
       });
 
       if (response.ok) {
@@ -295,10 +359,9 @@ export class AzureDevOpsService {
       const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/pullRequests/${this.pullRequestId}/changes?api-version=7.0`;
       console.log(`🔍 Changes URL: ${changesUrl}`);
       
-      const response = await fetch(changesUrl, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
-      });
+        const response = await this.safeFetch(changesUrl, {
+          headers: this.getAuthHeaders()
+        });
 
       if (response.ok) {
         const changesData = await response.json();
@@ -420,9 +483,8 @@ export class AzureDevOpsService {
     for (const approach of approaches) {
       try {
         console.log(`🔍 Trying approach: ${approach.name}`);
-        const response = await fetch(approach.url, {
-          headers: this.getAuthHeaders(),
-          agent: this.httpsAgent
+        const response = await this.safeFetch(approach.url, {
+          headers: this.getAuthHeaders()
         });
 
         if (response.ok) {
@@ -471,9 +533,8 @@ export class AzureDevOpsService {
       // Try to get changes using the Git diff API
       const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
       
-      const response = await fetch(diffUrl, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const response = await this.safeFetch(diffUrl, {
+        headers: this.getAuthHeaders()
       });
       
       if (response.ok) {
@@ -531,9 +592,8 @@ export class AzureDevOpsService {
       // Get the latest commit from source branch
       const sourceCommitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/commits?searchCriteria.itemVersion.version=${sourceBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
       
-      const sourceResponse = await fetch(sourceCommitsUrl, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const sourceResponse = await this.safeFetch(sourceCommitsUrl, {
+        headers: this.getAuthHeaders()
       });
       
       if (sourceResponse.ok) {
@@ -552,9 +612,8 @@ export class AzureDevOpsService {
           // Get the latest commit from target branch
           const targetCommitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/commits?searchCriteria.itemVersion.version=${targetBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
           
-          const targetResponse = await fetch(targetCommitsUrl, {
-            headers: this.getAuthHeaders(),
-            agent: this.httpsAgent
+          const targetResponse = await this.safeFetch(targetCommitsUrl, {
+            headers: this.getAuthHeaders()
           });
           
           if (targetResponse.ok) {
@@ -573,9 +632,8 @@ export class AzureDevOpsService {
               // Now get the diff between these two commits
               const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetCommitId}&targetVersion=${sourceCommitId}&api-version=7.0`;
               
-              const diffResponse = await fetch(diffUrl, {
-                headers: this.getAuthHeaders(),
-                agent: this.httpsAgent
+              const diffResponse = await this.safeFetch(diffUrl, {
+                headers: this.getAuthHeaders()
               });
               
               if (diffResponse.ok) {
@@ -790,9 +848,8 @@ export class AzureDevOpsService {
       const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${cleanTargetBranch}&targetVersion=${cleanSourceBranch}&api-version=7.0`;
       console.log(`🔍 Branch diff URL: ${diffUrl}`);
       
-      const response = await fetch(diffUrl, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const response = await this.safeFetch(diffUrl, {
+        headers: this.getAuthHeaders()
       });
       
       if (response.ok) {
@@ -846,9 +903,8 @@ export class AzureDevOpsService {
         const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
         console.log(`🔍 Repository ID diff URL: ${diffUrl}`);
         
-        const response = await fetch(diffUrl, {
-          headers: this.getAuthHeaders(),
-          agent: this.httpsAgent
+        const response = await this.safeFetch(diffUrl, {
+          headers: this.getAuthHeaders()
         });
         
         if (response.ok) {
@@ -905,9 +961,8 @@ export class AzureDevOpsService {
         const commitsUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/commits?searchCriteria.itemVersion.version=${sourceBranch}&searchCriteria.itemVersion.versionType=branch&api-version=7.0`;
         console.log(`🔍 Commits URL: ${commitsUrl}`);
         
-        const response = await fetch(commitsUrl, {
-          headers: this.getAuthHeaders(),
-          agent: this.httpsAgent
+        const response = await this.safeFetch(commitsUrl, {
+          headers: this.getAuthHeaders()
         });
         
         if (response.ok) {
@@ -923,9 +978,8 @@ export class AzureDevOpsService {
             
             // Get changes for this commit
             const changesUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${repoId}/commits/${commitId}/changes?api-version=7.0`;
-            const changesResponse = await fetch(changesUrl, {
-              headers: this.getAuthHeaders(),
-              agent: this.httpsAgent
+            const changesResponse = await this.safeFetch(changesUrl, {
+              headers: this.getAuthHeaders()
             });
             
             if (changesResponse.ok) {
@@ -971,9 +1025,8 @@ export class AzureDevOpsService {
       // Try to get file info without content
       const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&api-version=7.0`;
       
-      const response = await fetch(url, {
-        headers: this.getAuthHeaders(),
-        agent: this.httpsAgent
+      const response = await this.safeFetch(url, {
+        headers: this.getAuthHeaders()
       });
 
       if (response.ok) {
@@ -1093,7 +1146,38 @@ export class AzureDevOpsService {
         
         if (fileChanges.length > 0) {
           console.log(`✅ Found ${fileChanges.length} changes for file ${cleanPath}`);
-          return fileChanges.map((change: any) => change.item.path).join('\n');
+
+          // Try to produce a simple line-based diff between target (base) and source (modified)
+          try {
+            const targetContentRes = await this.getFileContent(cleanPath, targetBranch);
+            const sourceContentRes = await this.getFileContent(cleanPath, sourceBranch.replace('refs/heads/', ''));
+
+            const targetLines = (targetContentRes.content || '').split('\n');
+            const sourceLines = (sourceContentRes.content || '').split('\n');
+
+            const maxLines = Math.max(targetLines.length, sourceLines.length);
+            const diffLines: string[] = [];
+
+            // Build a minimal unified-style diff so the review agent can extract changed lines
+            for (let i = 0; i < maxLines; i++) {
+              const t = targetLines[i];
+              const s = sourceLines[i];
+              if (t === s) continue;
+
+              if (t !== undefined) diffLines.push(`- ${t}`);
+              if (s !== undefined) diffLines.push(`+ ${s}`);
+            }
+
+            if (diffLines.length > 0) {
+              const diffText = diffLines.join('\n');
+              return diffText;
+            }
+          } catch (diffBuildErr) {
+            console.log(`⚠️ Failed to build line-based diff for ${cleanPath}:`, diffBuildErr instanceof Error ? diffBuildErr.message : String(diffBuildErr));
+          }
+
+          // Fallback: return a simple notice that the file changed (avoid returning only file path)
+          return `File ${cleanPath} has changes between ${targetBranch} and ${sourceBranch}`;
         } else {
           console.log(`⚠️ No specific changes found for file ${cleanPath} in diff`);
           return '';
@@ -1296,11 +1380,10 @@ export class AzureDevOpsService {
       }
     }
 
-    const response = await fetch(url, {
+    const response = await this.safeFetch(url, {
       method: 'POST',
       headers: this.getAuthHeaders(),
-      body: JSON.stringify(body),
-      agent: this.httpsAgent
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -1367,9 +1450,8 @@ export class AzureDevOpsService {
   public async getExistingComments(): Promise<PRThread[]> {
     const url = this.getApiUrl('/threads');
     
-    const response = await fetch(url, {
-      headers: this.getAuthHeaders(),
-      agent: this.httpsAgent
+    const response = await this.safeFetch(url, {
+      headers: this.getAuthHeaders()
     });
 
     if (!response.ok) {
@@ -1383,10 +1465,9 @@ export class AzureDevOpsService {
   public async deleteComment(threadId: number, commentId: number): Promise<void> {
     const url = this.getApiUrl(`/threads/${threadId}/comments/${commentId}`);
     
-    const response = await fetch(url, {
+    const response = await this.safeFetch(url, {
       method: 'DELETE',
-      headers: this.getAuthHeaders(),
-      agent: this.httpsAgent
+      headers: this.getAuthHeaders()
     });
 
     if (!response.ok) {

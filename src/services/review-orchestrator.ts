@@ -205,6 +205,16 @@ export class ReviewOrchestrator {
         };
 
         // Run the review agent
+        // Debug logging: file sizes and diff info before LLM call
+        try {
+          console.log(`🔎 Preparing to call review agent for ${filePath}`);
+          console.log(`  - File content size: ${fileContent.content?.length || 0} chars`);
+          console.log(`  - File diff size: ${fileDiff?.length || 0} chars`);
+          console.log(`  - Line mapping entries: ${lineMapping ? (lineMapping.size || 0) : 0}`);
+        } catch (dbgErr) {
+          console.log('⚠️ Failed to log debug info before LLM call', dbgErr);
+        }
+
         const reviewResult = await this.reviewAgent.runReview(
           fileContent.content,
           fileDiff,
