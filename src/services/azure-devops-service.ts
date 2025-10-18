@@ -269,6 +269,15 @@ export class AzureDevOpsService {
     }
 
     const prDetails = await response.json();
+    // Normalize common Azure DevOps field names: some APIs return `pullRequestId`
+    if ((!prDetails.id || prDetails.id === undefined) && prDetails.pullRequestId) {
+      try {
+        prDetails.id = typeof prDetails.pullRequestId === 'number' ? prDetails.pullRequestId : parseInt(prDetails.pullRequestId, 10);
+      } catch (e) {
+        // ignore
+      }
+    }
+
     console.log(`✅ Successfully fetched PR details: ID=${prDetails.id}, Title="${prDetails.title}"`);
     return prDetails;
   }
@@ -369,7 +378,7 @@ export class AzureDevOpsService {
         
         if (changesData.value && Array.isArray(changesData.value)) {
           const filePaths = changesData.value
-            .filter((change: any) => change.item && change.item.changeType !== 'delete')
+              .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
             .map((change: any) => change.item.path);
           
           if (filePaths.length > 0) {
@@ -393,7 +402,7 @@ export class AzureDevOpsService {
       if (prDetails.changes && prDetails.changes.length > 0) {
         console.log(`✅ Found ${prDetails.changes.length} changes in PR details`);
         const filePaths = prDetails.changes
-          .filter((change: any) => change.item && change.item.changeType !== 'delete')
+            .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
           .map((change: any) => change.item.path);
         
         if (filePaths.length > 0) {
@@ -543,30 +552,12 @@ export class AzureDevOpsService {
         if (diffData.changes && Array.isArray(diffData.changes)) {
           // Filter out directories and deleted files, only keep actual files
           const filePaths = diffData.changes
-            .filter((change: any) => {
-              // Check if it's a valid change with an item
-              if (!change.item) {
-                return false;
-              }
-              
-              // Check if it's not a delete operation
-              if (change.item.changeType === 'delete') {
-                return false;
-              }
-              
-              // Check if it's not a directory (should have a file extension or not end with /)
-              const path = change.item.path;
-              if (!path || path.endsWith('/') || path.includes('/AdvancedPRReviewer/') || path === '/AdvancedPRReviewer') {
-                return false;
-              }
-              
-              // Check if it looks like a file (has extension or is a specific file)
-              const hasExtension = path.includes('.');
-              const isSpecificFile = path.includes('/') && !path.endsWith('/');
-              
-              return hasExtension || isSpecificFile;
-            })
-            .map((change: any) => change.item.path);
+              .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+              .map((change: any) => {
+                // Normalize path to always start with '/'
+                const p = change.item.path || '';
+                return p.startsWith('/') ? p : '/' + p;
+              });
           
           console.log(`✅ Successfully extracted ${filePaths.length} changed files using Git diff API`);
           return filePaths;
@@ -641,8 +632,11 @@ export class AzureDevOpsService {
                 
                 if (diffData.changes && Array.isArray(diffData.changes)) {
                   const filePaths = diffData.changes
-                    .filter((change: any) => change.item && change.item.changeType !== 'delete')
-                    .map((change: any) => change.item.path);
+                    .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+                    .map((change: any) => {
+                      const p = change.item.path || '';
+                      return p.startsWith('/') ? p : '/' + p;
+                    });
                   
                   console.log(`✅ Successfully extracted ${filePaths.length} changed files using Git commits API`);
                   return filePaths;
@@ -990,8 +984,11 @@ export class AzureDevOpsService {
                 // Get the actual file changes
                 const fileChanges = changesData.changes || [];
                 const filePaths = fileChanges
-                  .filter((change: any) => change.item && change.item.changeType !== 'delete')
-                  .map((change: any) => change.item.path);
+                  .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+                  .map((change: any) => {
+                    const p = change.item.path || '';
+                    return p.startsWith('/') ? p : '/' + p;
+                  });
                 
                 if (filePaths.length > 0) {
                   console.log(`✅ Found ${filePaths.length} changed files from commit changes`);
@@ -1718,29 +1715,18 @@ export class AzureDevOpsService {
 
   public validateAndCleanFilePaths(filePaths: string[]): string[] {
     console.log(`🔍 Validating and cleaning ${filePaths.length} file paths...`);
-    
     const validFilePaths = filePaths
       .filter((path: string) => {
-        // Skip empty paths
-        if (!path || path.trim() === '') {
-          return false;
-        }
-        
-        // Skip directory paths
-        if (path.endsWith('/') || path === '/AdvancedPRReviewer' || path.includes('/AdvancedPRReviewer/')) {
-          return false;
-        }
-        
-        // Skip paths that don't look like files
-        const hasExtension = path.includes('.');
-        const isSpecificFile = path.includes('/') && !path.endsWith('/');
-        
-        return hasExtension || isSpecificFile;
+        // Skip empty or whitespace-only paths
+        if (!path || path.trim() === '') return false;
+
+        // Skip obvious directory-only paths (trailing slash)
+        if (path.endsWith('/')) return false;
+
+        // Otherwise treat as a candidate file path
+        return true;
       })
-      .map((path: string) => {
-        // Ensure path starts with / for Azure DevOps
-        return path.startsWith('/') ? path : '/' + path;
-      });
+      .map((path: string) => path.startsWith('/') ? path : '/' + path);
     
     console.log(`✅ Validated and cleaned file paths: ${validFilePaths.length} files`);
     return validFilePaths;

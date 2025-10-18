@@ -212,6 +212,9 @@ The extension provides detailed logging:
 - LLM call tracking
 - Error details and stack traces
 
+### Verbose logging
+You can enable verbose debug logs (shows LLM prompts and response previews) by setting the environment variable `ADVPR_VERBOSE=1`. The task manifest sets this by default for the packaged task, but you can override it in your pipeline or agent environment if you prefer quieter logs.
+
 ## 📈 Performance & Cost
 
 ### LLM Call Optimization
