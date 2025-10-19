@@ -158,12 +158,22 @@ export class ReviewOrchestrator {
 
         // Get file content and diff with line numbers
         const fileContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
+
+        // Detect and skip folder-like responses (Azure DevOps returns a JSON tree for folders)
+        const rawContentPreview = (fileContent.content || '').substring(0, 200);
+        if (rawContentPreview.includes('"gitObjectType"') && rawContentPreview.includes('"tree"')) {
+          console.log(`⏭️  Skipping folder/non-file path: ${filePath} (returned tree metadata)`);
+          continue;
+        }
         let fileDiff = '';
         let lineMapping = new Map();
         
         try {
+          // Normalize source branch name (strip refs/heads/) for API calls
+          const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
+
           // Try to get diff with line numbers first
-          const diffResult = await this.azureDevOpsService.getFileDiffWithLineNumbers(filePath, targetBranch, prDetails.sourceRefName);
+          const diffResult = await this.azureDevOpsService.getFileDiffWithLineNumbers(filePath, targetBranch, cleanSource);
           fileDiff = diffResult.diff;
           lineMapping = diffResult.lineMapping;
           console.log(`✅ Got file diff with line mapping for ${filePath}`);
@@ -173,7 +183,9 @@ export class ReviewOrchestrator {
           
           // Fallback to regular diff
           try {
-            fileDiff = await this.azureDevOpsService.getFileDiff(filePath, targetBranch, prDetails.sourceRefName);
+            // Try again with normalized source branch
+            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
+            fileDiff = await this.azureDevOpsService.getFileDiff(filePath, targetBranch, cleanSource);
             console.log(`✅ Got regular file diff for ${filePath}`);
           } catch (regularDiffError) {
             const regularErrorMessage = regularDiffError instanceof Error ? regularDiffError.message : String(regularDiffError);
@@ -186,6 +198,40 @@ export class ReviewOrchestrator {
         if (fileContent.isBinary) {
           console.log(`⏭️  Skipping binary file content: ${filePath}`);
           continue;
+        }
+
+        // If diff is empty or no lineMapping entries, build a best-effort unified diff from file contents
+        if ((!fileDiff || fileDiff.length === 0) || (lineMapping && (lineMapping.size === 0))) {
+          try {
+            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
+            const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
+            const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
+
+            const sourceLines = (sourceContent.content || '').split('\n');
+            const targetLines = (targetContent.content || '').split('\n');
+            const maxLines = Math.max(sourceLines.length, targetLines.length);
+
+            // Build a single hunk unified-style diff so the agent can parse changed lines
+            const diffLines: string[] = [];
+            diffLines.push(`@@ -1,${targetLines.length} +1,${sourceLines.length} @@`);
+            for (let i = 0; i < maxLines; i++) {
+              const t = targetLines[i];
+              const s = sourceLines[i];
+              if (t === s) {
+                diffLines.push(` ${t === undefined ? '' : t}`);
+              } else {
+                if (t !== undefined) diffLines.push(`- ${t}`);
+                if (s !== undefined) diffLines.push(`+ ${s}`);
+              }
+            }
+
+            const fallbackDiff = diffLines.join('\n');
+            // Replace fileDiff and allow the agent to compute added lines from it
+            fileDiff = fallbackDiff;
+            console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
+          } catch (fallbackErr) {
+            console.log(`⚠️ Failed to build fallback diff for ${filePath}:`, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
+          }
         }
 
         // Check if we've exceeded LLM call limit
