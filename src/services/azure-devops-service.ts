@@ -68,6 +68,8 @@ export class AzureDevOpsService {
   private pullRequestId: string;
   private accessToken: string;
   private httpsAgent: Agent;
+  private cachedIterations: any[] | null = null;
+  private iterationContextCache: { firstComparingIteration: number; secondComparingIteration: number } | null = null;
 
   constructor(httpsAgent: Agent) {
     this.collectionUri = tl.getVariable('SYSTEM.TEAMFOUNDATIONCOLLECTIONURI') || '';
@@ -283,6 +285,11 @@ export class AzureDevOpsService {
   }
 
   public async getLatestPRIteration(): Promise<any | null> {
+    // Return cached value when available to avoid hammering the API.
+    if (this.cachedIterations && this.cachedIterations.length > 0) {
+      return this.cachedIterations[this.cachedIterations.length - 1];
+    }
+
     try {
       if (!this.pullRequestId) return null;
       const url = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}/_apis/git/repositories/${this.repositoryId || this.repositoryName}/pullRequests/${this.pullRequestId}/iterations?api-version=7.0`;
@@ -301,8 +308,12 @@ export class AzureDevOpsService {
       const iterations = data.value || [];
       if (iterations.length === 0) return null;
 
-      // Return the last iteration (highest id)
+      // Cache iterations so we can reuse both the latest and previous iteration numbers later.
       iterations.sort((a: any, b: any) => (a.id || 0) - (b.id || 0));
+      this.cachedIterations = iterations;
+      this.iterationContextCache = null; // invalidate cached derived context
+
+      // Return the last iteration (highest id)
       const latest = iterations[iterations.length - 1];
       console.log(`🔍 Found ${iterations.length} iterations, latest id=${latest.id}, changeTrackingId=${latest.changeTrackingId || 'N/A'}`);
       return latest;
@@ -402,12 +413,13 @@ export class AzureDevOpsService {
       if (prDetails.changes && prDetails.changes.length > 0) {
         console.log(`✅ Found ${prDetails.changes.length} changes in PR details`);
         const filePaths = prDetails.changes
-            .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+          .filter((change: any) => change && change.item && change.item.changeType !== 'delete' && change.item.gitObjectType !== 'tree' && change.item.isFolder !== true)
           .map((change: any) => change.item.path);
         
-        if (filePaths.length > 0) {
-          console.log(`✅ Successfully extracted ${filePaths.length} changed files from PR details`);
-          return filePaths;
+        const cleaned = this.validateAndCleanFilePaths(filePaths);
+        if (cleaned.length > 0) {
+          console.log(`✅ Successfully extracted ${cleaned.length} changed files from PR details`);
+          return cleaned;
         }
       } else {
         console.log(`⚠️ No changes found in PR details response`);
@@ -423,14 +435,7 @@ export class AzureDevOpsService {
       const gitDiffFiles = await this.getChangedFilesUsingGitDiff();
       if (gitDiffFiles.length > 0) {
         console.log(`✅ Successfully got ${gitDiffFiles.length} changed files using Git diff API`);
-        // Validate and clean the file paths
-        const validFiles = this.validateAndCleanFilePaths(gitDiffFiles);
-        if (validFiles.length > 0) {
-          console.log(`✅ Returning ${validFiles.length} validated file paths`);
-          return validFiles;
-        } else {
-          console.log(`⚠️ No valid file paths found after validation`);
-        }
+        return gitDiffFiles;
       }
     } catch (gitDiffError) {
       const errorMessage = gitDiffError instanceof Error ? gitDiffError.message : String(gitDiffError);
@@ -552,15 +557,16 @@ export class AzureDevOpsService {
         if (diffData.changes && Array.isArray(diffData.changes)) {
           // Filter out directories and deleted files, only keep actual files
           const filePaths = diffData.changes
-              .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+              .filter((change: any) => change && change.item && change.item.changeType !== 'delete' && change.item.gitObjectType !== 'tree' && change.item.isFolder !== true)
               .map((change: any) => {
                 // Normalize path to always start with '/'
                 const p = change.item.path || '';
                 return p.startsWith('/') ? p : '/' + p;
               });
           
-          console.log(`✅ Successfully extracted ${filePaths.length} changed files using Git diff API`);
-          return filePaths;
+          const filteredPaths = filePaths.filter((path: string, index: number, arr: string[]) => arr.indexOf(path) === index);
+          console.log(`✅ Successfully extracted ${filteredPaths.length} changed files using Git diff API`);
+          return this.validateAndCleanFilePaths(filteredPaths);
         }
       } else {
         console.log(`⚠️ Git diff API failed: ${response.status} ${response.statusText}`);
@@ -632,14 +638,14 @@ export class AzureDevOpsService {
                 
                 if (diffData.changes && Array.isArray(diffData.changes)) {
                   const filePaths = diffData.changes
-                    .filter((change: any) => change && change.item && change.item.changeType !== 'delete')
+                    .filter((change: any) => change && change.item && change.item.changeType !== 'delete' && change.item.gitObjectType !== 'tree' && change.item.isFolder !== true)
                     .map((change: any) => {
                       const p = change.item.path || '';
                       return p.startsWith('/') ? p : '/' + p;
                     });
                   
                   console.log(`✅ Successfully extracted ${filePaths.length} changed files using Git commits API`);
-                  return filePaths;
+                  return this.validateAndCleanFilePaths(filePaths);
                 }
               } else {
                 console.log(`⚠️ Commits diff API failed: ${diffResponse.status} ${diffResponse.statusText}`);
@@ -852,12 +858,13 @@ export class AzureDevOpsService {
         
         if (diffData.changes && Array.isArray(diffData.changes)) {
           const filePaths = diffData.changes
-            .filter((change: any) => change.item && change.item.changeType !== 'delete')
+            .filter((change: any) => change.item && change.item.changeType !== 'delete' && change.item.gitObjectType !== 'tree' && change.item.isFolder !== true)
             .map((change: any) => change.item.path);
           
-          if (filePaths.length > 0) {
-            console.log(`✅ Found ${filePaths.length} changed files from branch diff`);
-            return filePaths;
+          const cleaned = this.validateAndCleanFilePaths(filePaths);
+          if (cleaned.length > 0) {
+            console.log(`✅ Found ${cleaned.length} changed files from branch diff`);
+            return cleaned;
           }
         }
       } else {
@@ -907,12 +914,13 @@ export class AzureDevOpsService {
           
           if (diffData.changes && Array.isArray(diffData.changes)) {
             const filePaths = diffData.changes
-              .filter((change: any) => change.item && change.item.changeType !== 'delete')
+              .filter((change: any) => change.item && change.item.changeType !== 'delete' && change.item.gitObjectType !== 'tree' && change.item.isFolder !== true)
               .map((change: any) => change.item.path);
             
-            if (filePaths.length > 0) {
-              console.log(`✅ Found ${filePaths.length} changed files using repository ID`);
-              return filePaths;
+            const cleaned = this.validateAndCleanFilePaths(filePaths);
+            if (cleaned.length > 0) {
+              console.log(`✅ Found ${cleaned.length} changed files using repository ID`);
+              return cleaned;
             }
           }
         } else {
@@ -924,8 +932,11 @@ export class AzureDevOpsService {
       console.log(`🔄 Trying to get files from PR commits...`);
       const commitFiles = await this.getFilesFromPRCommits();
       if (commitFiles.length > 0) {
-        console.log(`✅ Found ${commitFiles.length} files from PR commits`);
-        return commitFiles;
+        const cleaned = this.validateAndCleanFilePaths(commitFiles);
+        if (cleaned.length > 0) {
+          console.log(`✅ Found ${cleaned.length} files from PR commits`);
+          return cleaned;
+        }
       }
       
       // If all else fails, return empty array to avoid reviewing non-existent files
@@ -1346,22 +1357,55 @@ export class AzureDevOpsService {
     }
   }
 
+  private async getIterationContextForInlineComments(): Promise<{ firstComparingIteration: number; secondComparingIteration: number } | null> {
+    if (this.iterationContextCache) {
+      return this.iterationContextCache;
+    }
+
+    const latestIteration = await this.getLatestPRIteration();
+    if (!latestIteration) {
+      return null;
+    }
+
+    // Azure DevOps expects 1-based iteration values and rejects 0.
+    const rawSecond =
+      latestIteration.changeTrackingId ??
+      latestIteration.id ??
+      latestIteration.iterationId ??
+      latestIteration.targetCommit;
+
+    const secondComparingIteration = Number(rawSecond);
+    if (!Number.isFinite(secondComparingIteration) || secondComparingIteration <= 0) {
+      return null;
+    }
+
+    let firstComparingIteration: number | null = null;
+    if (this.cachedIterations && this.cachedIterations.length > 1) {
+      const previous = this.cachedIterations[this.cachedIterations.length - 2];
+      const rawPrevious =
+        previous?.changeTrackingId ??
+        previous?.id ??
+        previous?.iterationId ??
+        previous?.targetCommit;
+      const previousId = Number(rawPrevious);
+      if (Number.isFinite(previousId) && previousId > 0) {
+        firstComparingIteration = previousId;
+      }
+    }
+
+    if (!firstComparingIteration) {
+      firstComparingIteration = Math.max(1, secondComparingIteration - 1);
+    }
+
+    this.iterationContextCache = {
+      firstComparingIteration,
+      secondComparingIteration
+    };
+    return this.iterationContextCache;
+  }
+
   public async addComment(comment: PRComment): Promise<void> {
     const url = this.getApiUrl('/threads');
-    // Best-effort: try to include pullRequestThreadContext (iteration/changeTrackingId) if available
-    let pullRequestThreadContext: any = undefined;
-    try {
-      const latestIteration = await this.getLatestPRIteration();
-      if (latestIteration) {
-        pullRequestThreadContext = {
-          iterationContext: {
-            changeTrackingId: latestIteration.changeTrackingId || latestIteration.id
-          }
-        };
-      }
-    } catch (e) {
-      // ignore - best-effort only
-    }
 
     const body: any = {
       comments: [comment],
@@ -1369,43 +1413,21 @@ export class AzureDevOpsService {
       threadContext: comment.threadContext
     };
 
-    // If we have iteration info and the comment has threadContext (file ranges),
-    // copy those range fields into pullRequestThreadContext so Azure DevOps can
-    // anchor the thread to the correct file & iteration precisely.
-    // NOTE: This is best-effort. Azure DevOps will reject invalid iteration fields
-    // (e.g., FirstComparingIteration = 0). Only include pullRequestThreadContext
-    // when we have a valid iteration id (>0) AND a filePath (range) to anchor to.
-    if (pullRequestThreadContext && comment.threadContext) {
+    // Best effort: include iteration context only when we have a valid iteration pair and file info.
+    if (comment.threadContext && (comment.threadContext as any).filePath) {
       try {
-        const tc = comment.threadContext as any;
-        const extendedPRThreadContext: any = {};
-
-        // Only copy file path/range fields if present
-        if (tc.filePath) extendedPRThreadContext.filePath = tc.filePath;
-        if (tc.rightFileStart) extendedPRThreadContext.rightFileStart = tc.rightFileStart;
-        if (tc.rightFileEnd) extendedPRThreadContext.rightFileEnd = tc.rightFileEnd;
-        if (tc.leftFileStart) extendedPRThreadContext.leftFileStart = tc.leftFileStart;
-        if (tc.leftFileEnd) extendedPRThreadContext.leftFileEnd = tc.leftFileEnd;
-
-        // Only include the iterationContext if it contains a positive id/changeTrackingId
-        const iter = pullRequestThreadContext.iterationContext;
-        const iterId = iter && (iter.changeTrackingId || iter.id) ? (iter.changeTrackingId || iter.id) : null;
-        if (iterId && Number(iterId) > 0 && extendedPRThreadContext.filePath) {
-          extendedPRThreadContext.iterationContext = { changeTrackingId: iterId };
-          body.pullRequestThreadContext = extendedPRThreadContext;
-        } else if (extendedPRThreadContext.filePath) {
-          // We have a file path/range but no valid iteration id - include only the range
-          body.threadContext = comment.threadContext;
+        const iterationContext = await this.getIterationContextForInlineComments();
+        if (iterationContext) {
+          const clonedThreadContext = JSON.parse(JSON.stringify(comment.threadContext));
+          body.pullRequestThreadContext = {
+            ...clonedThreadContext,
+            iterationContext
+          };
+          console.log(`🔄 Using iteration context for inline comment: first=${iterationContext.firstComparingIteration}, second=${iterationContext.secondComparingIteration}`);
         }
       } catch (e) {
-        // If anything goes wrong, avoid sending pullRequestThreadContext to prevent 400 errors
-        console.log('\u26a0\ufe0f Failed to build extended pullRequestThreadContext, falling back to threadContext only');
-        body.threadContext = comment.threadContext;
+        console.log('⚠️ Unable to build pullRequestThreadContext, falling back to standard threadContext only');
       }
-    } else if (pullRequestThreadContext && !comment.threadContext) {
-      // If we only have iteration info but no file range, avoid sending it (can cause errors)
-      // and rely on regular PR-level comments instead
-      // Do nothing here - body.threadContext already set when comment.threadContext is undefined
     }
 
     const response = await this.safeFetch(url, {
@@ -1746,21 +1768,65 @@ export class AzureDevOpsService {
 
   public validateAndCleanFilePaths(filePaths: string[]): string[] {
     console.log(`🔍 Validating and cleaning ${filePaths.length} file paths...`);
-    const validFilePaths = filePaths
-      .filter((path: string) => {
-        // Skip empty or whitespace-only paths
-        if (!path || path.trim() === '') return false;
 
-        // Skip obvious directory-only paths (trailing slash)
-        if (path.endsWith('/')) return false;
+    const knownExtensionlessFiles = new Set([
+      'Dockerfile',
+      'Makefile',
+      'Procfile',
+      'Jenkinsfile',
+      'Gemfile',
+      'Rakefile',
+      'Vagrantfile',
+      'LICENSE',
+      'LICENSE.txt',
+      'NOTICE',
+      'COPYING',
+      'AUTHORS',
+      'README',
+      'CHANGELOG',
+      'CONTRIBUTING',
+      'SECURITY',
+      'CODEOWNERS'
+    ]);
 
-        // Otherwise treat as a candidate file path
-        return true;
-      })
-      .map((path: string) => path.startsWith('/') ? path : '/' + path);
-    
-    console.log(`✅ Validated and cleaned file paths: ${validFilePaths.length} files`);
-    return validFilePaths;
+    const cleaned = new Set<string>();
+
+    for (const rawPath of filePaths) {
+      if (!rawPath) {
+        continue;
+      }
+
+      const trimmed = rawPath.trim();
+      if (trimmed === '') {
+        continue;
+      }
+
+      const normalized = trimmed.startsWith('/') ? trimmed : '/' + trimmed;
+      if (normalized.endsWith('/')) {
+        // Obvious directory
+        continue;
+      }
+
+      const segments = normalized.split('/').filter(Boolean);
+      if (segments.length === 0) {
+        continue;
+      }
+
+      const fileName = segments[segments.length - 1];
+      const hasExtension = fileName.includes('.') && fileName.lastIndexOf('.') !== 0;
+      const allowExtensionless = knownExtensionlessFiles.has(fileName);
+
+      if (!hasExtension && !allowExtensionless) {
+        // Likely a directory (e.g., /src/agents). Skip to avoid later API 500s.
+        console.log(`⚠️ Skipping potential directory path: ${normalized}`);
+        continue;
+      }
+
+      cleaned.add(normalized);
+    }
+
+    const result = Array.from(cleaned);
+    console.log(`✅ Validated and cleaned file paths: ${result.length} files`);
+    return result;
   }
 }
-
