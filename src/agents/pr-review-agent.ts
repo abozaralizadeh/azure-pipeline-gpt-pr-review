@@ -93,7 +93,8 @@ export class AdvancedPRReviewAgent {
     fileContent: string,
     fileDiff: string,
     fileName: string,
-    prContext: any
+    prContext: any,
+    lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>
   ): Promise<PRReviewStateType> {
     const initialState: PRReviewStateType = {
       messages: [],
@@ -111,8 +112,8 @@ export class AdvancedPRReviewAgent {
 
     try {
       // Run the review process sequentially
-      let state = await this.analyzeContext(initialState);
-      state = await this.reviewFile(state);
+  let state = await this.analyzeContext(initialState);
+  state = await this.reviewFile(state, lineMapping);
       state = await this.securityScan(state);
       state = await this.generateSuggestions(state);
       state = await this.finalizeReview(state);
@@ -321,16 +322,46 @@ Respond with JSON:
     }
   }
 
-  private async reviewFile(state: PRReviewStateType): Promise<PRReviewStateType> {
+  private async reviewFile(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>): Promise<PRReviewStateType> {
     if (this.llmCalls >= this.maxLLMCalls || !state.file_content || !state.file_diff) {
       return state;
     }
 
     // Parse the diff to extract line numbers and changes
-    const diffAnalysis = this.analyzeDiff(state.file_diff || '');
+    let diffAnalysis = this.analyzeDiff(state.file_diff || '');
+
+    // If analyzeDiff found no changed lines but a lineMapping was provided by the orchestrator,
+    // use that mapping to construct changedContent and addedLines as a fallback so we can still
+    // produce focused changed-line context for the LLM.
+    if ((diffAnalysis.changedContent.length === 0 || diffAnalysis.addedLines.length === 0) && lineMapping && lineMapping.size > 0) {
+      try {
+        console.log(`🔄 Fallback: building changedContent from provided lineMapping (entries: ${lineMapping.size})`);
+        const fileLines = (state.file_content || '').split('\n');
+        const addedLines: number[] = [];
+        const changedContent: string[] = [];
+
+        // lineMapping keys are diff-line numbers; values have modifiedLine indicating target file line
+        for (const [, mapping] of Array.from(lineMapping.entries())) {
+          if (mapping.isAdded) {
+            const targetLine = mapping.modifiedLine;
+            // mapping.modifiedLine is 1-based from parseDiffLineNumbers
+            const content = fileLines[targetLine - 1] || '';
+            addedLines.push(targetLine);
+            changedContent.push(content);
+          }
+        }
+
+        if (addedLines.length > 0) {
+          diffAnalysis = { addedLines, removedLines: [], modifiedLines: [], changedContent };
+          console.log(`✅ Built fallback changedContent with ${addedLines.length} added lines from lineMapping`);
+        }
+      } catch (fbErr) {
+        console.log(`⚠️ Failed fallback lineMapping processing:`, fbErr instanceof Error ? fbErr.message : String(fbErr));
+      }
+    }
     
     // First, check for obvious syntax errors in the changed content
-    const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown');
+  const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown');
     if (syntaxErrors.length > 0) {
       console.log(`🚨 Detected ${syntaxErrors.length} syntax errors in changed content`);
       for (const error of syntaxErrors) {
@@ -454,13 +485,32 @@ CRITICAL REQUIREMENTS:
       if (review.issues && Array.isArray(review.issues)) {
         review.issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
-            // If the issue contains a valid changed-line number, add it as an inline comment
-            if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
-              console.log(`✅ Issue line ${issue.line_number} is in changed lines - processing`);
+            let chosenLine = 0;
 
+            // If the issue already contains a valid changed-line number, prefer it
+            if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
+              chosenLine = issue.line_number;
+              console.log(`✅ Issue line ${issue.line_number} is in changed lines - using provided line`);
+            } else {
+              // Try to heuristically find the best matching line (using code_snippet, description, keywords)
+              try {
+                const mapped = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
+                if (mapped && mapped > 0) {
+                  chosenLine = mapped;
+                  console.log(`🔧 Mapped issue to best line ${chosenLine} using heuristics`);
+                } else {
+                  console.log(`⚠️ Could not map issue to a changed line using heuristics (issue.line: ${issue.line_number})`);
+                }
+              } catch (mapErr) {
+                console.log(`⚠️ Error while mapping issue to line:`, mapErr instanceof Error ? mapErr.message : String(mapErr));
+              }
+            }
+
+            if (chosenLine && chosenLine > 0) {
+              // Attach as an inline comment
               state.review_comments.push({
                 file: state.current_file || "unknown",
-                line: issue.line_number,
+                line: chosenLine,
                 comment: issue.description,
                 type: issue.type,
                 confidence: issue.confidence,
@@ -468,8 +518,7 @@ CRITICAL REQUIREMENTS:
                 is_new_issue: issue.is_new_issue !== false // Default to true if not specified
               });
             } else {
-              // Instead of silently skipping issues that don't have a valid changed-line,
-              // convert them into a PR-level summary comment so they are still visible to the reviewer.
+              // Fall back to PR-level comment so the reviewer still sees the issue
               console.log(`⚠️ Issue missing or outside changed lines: creating PR-level summary (issue line: ${issue.line_number})`);
 
               state.review_comments.push({
@@ -941,7 +990,7 @@ CRITICAL REQUIREMENTS:
     return false;
   }
 
-  private async securityScan(state: PRReviewStateType): Promise<PRReviewStateType> {
+  private async securityScan(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>): Promise<PRReviewStateType> {
     if (this.llmCalls >= this.maxLLMCalls) {
       return state;
     }
@@ -951,7 +1000,30 @@ CRITICAL REQUIREMENTS:
     }
 
     // Parse the diff to extract line numbers and changes
-    const diffAnalysis = this.analyzeDiff(state.file_diff || '');
+    let diffAnalysis = this.analyzeDiff(state.file_diff || '');
+
+    // Fallback to provided lineMapping if no changed lines were found
+    if ((diffAnalysis.changedContent.length === 0 || diffAnalysis.addedLines.length === 0) && lineMapping && lineMapping.size > 0) {
+      try {
+        const fileLines = (state.file_content || '').split('\n');
+        const addedLines: number[] = [];
+        const changedContent: string[] = [];
+        for (const [, mapping] of Array.from(lineMapping.entries())) {
+          if (mapping.isAdded) {
+            const targetLine = mapping.modifiedLine;
+            const content = fileLines[targetLine - 1] || '';
+            addedLines.push(targetLine);
+            changedContent.push(content);
+          }
+        }
+        if (addedLines.length > 0) {
+          diffAnalysis = { addedLines, removedLines: [], modifiedLines: [], changedContent };
+          console.log(`✅ Security scan fallback: built changedContent from lineMapping with ${addedLines.length} lines`);
+        }
+      } catch (fbErr) {
+        console.log(`⚠️ Security scan fallback failed:`, fbErr instanceof Error ? fbErr.message : String(fbErr));
+      }
+    }
 
     // Create a focused context with ONLY the changed lines for security analysis
     const changedLinesContext = diffAnalysis.changedContent.map((line, index) => {
@@ -1051,20 +1123,39 @@ CRITICAL REQUIREMENTS:
       if (securityAnalysis.security_issues && Array.isArray(securityAnalysis.security_issues)) {
         securityAnalysis.security_issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
-            // CRITICAL: Only process security issues that have line numbers in the changed lines
+            let chosenLine = 0;
+
+            // Prefer provided line if valid
             if (issue.line_number && diffAnalysis.addedLines.includes(issue.line_number)) {
-              console.log(`✅ Security issue line ${issue.line_number} is in changed lines - processing`);
-              
+              chosenLine = issue.line_number;
+              console.log(`✅ Security issue line ${issue.line_number} is in changed lines - using provided line`);
+            } else {
+              // Attempt heuristic mapping for security issues too
+              try {
+                const mapped = this.findBestLineNumber(issue, diffAnalysis, state.file_content || '');
+                if (mapped && mapped > 0) {
+                  chosenLine = mapped;
+                  console.log(`🔧 Mapped security issue to best line ${chosenLine} using heuristics`);
+                } else {
+                  console.log(`❌ Security issue line ${issue.line_number} is NOT in changed lines (${diffAnalysis.addedLines.join(', ')}) - will skip inline posting`);
+                }
+              } catch (mapErr) {
+                console.log(`⚠️ Error while mapping security issue to line:`, mapErr instanceof Error ? mapErr.message : String(mapErr));
+              }
+            }
+
+            if (chosenLine && chosenLine > 0) {
+              console.log(`✅ Security issue line ${chosenLine} is in changed lines - processing`);
               state.review_comments.push({
                 file: state.current_file || "unknown",
-                line: issue.line_number,
+                line: chosenLine,
                 comment: `SECURITY: ${issue.description}`,
                 type: "security",
                 confidence: issue.confidence,
                 suggestion: issue.recommendation
               });
             } else {
-              console.log(`❌ Security issue line ${issue.line_number} is NOT in changed lines (${diffAnalysis.addedLines.join(', ')}) - SKIPPING`);
+              console.log(`❌ Security issue could not be mapped to a changed line - SKIPPING inline comment`);
             }
           }
         });

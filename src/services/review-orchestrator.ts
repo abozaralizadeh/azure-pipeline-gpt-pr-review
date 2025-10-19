@@ -234,6 +234,46 @@ export class ReviewOrchestrator {
           }
         }
 
+        // Additionally: if the diff exists but doesn't look like a unified diff (no hunks or +/- lines),
+        // build a fallback unified diff to ensure the agent can extract changed lines.
+        try {
+          const hasHunk = fileDiff && /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(fileDiff);
+          // Only consider explicit unified-diff markers (+ or - at start of a line).
+          // Previously we treated lines starting with a space as a sign of unified diff which
+          // produced false positives when raw file content had leading spaces. Ensure we only
+          // treat plus/minus prefixes as diff indicators so the fallback builder runs when
+          // fileDiff is actually raw file content.
+          const hasPlusMinus = fileDiff && /^(\+|\-)/m.test(fileDiff);
+          if (fileDiff && !(hasHunk || hasPlusMinus)) {
+            console.log(`🔍 Diff for ${filePath} doesn't contain unified hunks or +/-, building fallback unified diff`);
+            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
+            const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
+            const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
+
+            const sourceLines = (sourceContent.content || '').split('\n');
+            const targetLines = (targetContent.content || '').split('\n');
+            const maxLines = Math.max(sourceLines.length, targetLines.length);
+
+            const diffLines: string[] = [];
+            diffLines.push(`@@ -1,${targetLines.length} +1,${sourceLines.length} @@`);
+            for (let i = 0; i < maxLines; i++) {
+              const t = targetLines[i];
+              const s = sourceLines[i];
+              if (t === s) {
+                diffLines.push(` ${t === undefined ? '' : t}`);
+              } else {
+                if (t !== undefined) diffLines.push(`- ${t}`);
+                if (s !== undefined) diffLines.push(`+ ${s}`);
+              }
+            }
+
+            fileDiff = diffLines.join('\n');
+            console.log(`🔧 Replaced fileDiff with fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
+          }
+        } catch (err) {
+          console.log(`⚠️ Error while checking/building fallback diff for ${filePath}:`, err instanceof Error ? err.message : String(err));
+        }
+
         // Check if we've exceeded LLM call limit
         if (totalLLMCalls >= this.maxLLMCalls) {
           console.log(`⚠️  Maximum LLM calls (${this.maxLLMCalls}) reached. Stopping review.`);
@@ -265,7 +305,8 @@ export class ReviewOrchestrator {
           fileContent.content,
           fileDiff,
           filePath,
-          prContext
+          prContext,
+          lineMapping // pass mapping so agent can fall back to it when diff parsing fails
         );
 
         reviewResults.push(reviewResult);
