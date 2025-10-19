@@ -1049,13 +1049,12 @@ export class AzureDevOpsService {
     
     const url = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&versionDescriptor.version=${targetBranch}&api-version=7.0`;
     console.log(`🔍 File content URL: ${url}`);
-    
-    const response = await fetch(url, {
+
+    // Use safeFetch for consistent retry/error logging
+    const response = await this.safeFetch(url, {
       headers: this.getAuthHeaders(),
       agent: this.httpsAgent
     });
-
-    console.log(`🔍 File content response status: ${response.status} ${response.statusText}`);
 
     if (!response.ok) {
       // Try to get error details
@@ -1066,38 +1065,51 @@ export class AzureDevOpsService {
       } catch (e) {
         errorDetails = ' - Could not read error response body';
       }
-      
+
       throw new Error(`Failed to fetch file content for ${cleanPath}: ${response.status} ${response.statusText}${errorDetails}`);
     }
 
-    // Get the response text first
+    // Read as text initially
     const responseText = await response.text();
-    console.log(`🔍 Raw response text (first 200 chars):`, responseText.substring(0, 200));
-    
-    let content: any;
+    console.log(`🔍 Raw response text (first 200 chars): ${responseText.substring(0, 200)}`);
+
     let fileContent = '';
     let fileSize = 0;
-    
-    // Try to parse as JSON first (for file metadata)
+
+    // If the API returned JSON metadata (no 'content' field), request the raw text content explicitly
     try {
-      content = JSON.parse(responseText);
-      
-      // Check if it's a JSON response with file content
-      if (content.content !== undefined) {
-        fileContent = content.content;
-        fileSize = content.size || 0;
+      const parsed = JSON.parse(responseText);
+      if (parsed && parsed.content !== undefined) {
+        // Some APIs return a JSON wrapper with a 'content' field
+        fileContent = parsed.content;
+        fileSize = parsed.size || fileContent.length;
         console.log(`✅ Parsed JSON response with file content (size: ${fileSize})`);
       } else {
-        // JSON response but no content field
-        console.log(`⚠️ JSON response without content field:`, Object.keys(content));
-        throw new Error('JSON response missing content field');
+        // Looks like metadata (tree/blob) - request the raw text version explicitly
+        console.log(`⚠️ JSON response without content field: ${Object.keys(parsed)} - fetching raw text version`);
+        const rawUrl = `${url}&includeContent=true&$format=text`;
+        const rawResp = await this.safeFetch(rawUrl, {
+          headers: Object.assign({}, this.getAuthHeaders(), { 'Accept': 'text/plain' }),
+          agent: this.httpsAgent
+        });
+
+        if (!rawResp.ok) {
+          const rawBody = await rawResp.text().catch(() => '<could not read>');
+          console.log(`⚠️ Failed to fetch raw file content: ${rawResp.status} ${rawResp.statusText} - ${rawBody.substring(0,200)}`);
+          // Fall back to using the original JSON string as content (safer than throwing here)
+          fileContent = responseText;
+          fileSize = fileContent.length;
+        } else {
+          fileContent = await rawResp.text();
+          fileSize = fileContent.length;
+          console.log(`✅ Fetched raw file content (size: ${fileSize})`);
+        }
       }
-    } catch (jsonError) {
-      // If JSON parsing fails, treat the response as raw file content
-      console.log(`🔄 JSON parsing failed, treating response as raw file content`);
+    } catch (e) {
+      // Not JSON - response text is likely the file content already
       fileContent = responseText;
-      fileSize = responseText.length;
-      console.log(`✅ Using raw response as file content (size: ${fileSize})`);
+      fileSize = fileContent.length;
+      console.log(`🔄 Response not JSON, using as raw file content (size: ${fileSize})`);
     }
     
     // Check if file is binary
@@ -1360,21 +1372,40 @@ export class AzureDevOpsService {
     // If we have iteration info and the comment has threadContext (file ranges),
     // copy those range fields into pullRequestThreadContext so Azure DevOps can
     // anchor the thread to the correct file & iteration precisely.
-    if (pullRequestThreadContext) {
-      if (comment.threadContext) {
+    // NOTE: This is best-effort. Azure DevOps will reject invalid iteration fields
+    // (e.g., FirstComparingIteration = 0). Only include pullRequestThreadContext
+    // when we have a valid iteration id (>0) AND a filePath (range) to anchor to.
+    if (pullRequestThreadContext && comment.threadContext) {
+      try {
         const tc = comment.threadContext as any;
-        const extendedPRThreadContext = Object.assign({}, pullRequestThreadContext);
+        const extendedPRThreadContext: any = {};
 
+        // Only copy file path/range fields if present
         if (tc.filePath) extendedPRThreadContext.filePath = tc.filePath;
         if (tc.rightFileStart) extendedPRThreadContext.rightFileStart = tc.rightFileStart;
         if (tc.rightFileEnd) extendedPRThreadContext.rightFileEnd = tc.rightFileEnd;
         if (tc.leftFileStart) extendedPRThreadContext.leftFileStart = tc.leftFileStart;
         if (tc.leftFileEnd) extendedPRThreadContext.leftFileEnd = tc.leftFileEnd;
 
-        body.pullRequestThreadContext = extendedPRThreadContext;
-      } else {
-        body.pullRequestThreadContext = pullRequestThreadContext;
+        // Only include the iterationContext if it contains a positive id/changeTrackingId
+        const iter = pullRequestThreadContext.iterationContext;
+        const iterId = iter && (iter.changeTrackingId || iter.id) ? (iter.changeTrackingId || iter.id) : null;
+        if (iterId && Number(iterId) > 0 && extendedPRThreadContext.filePath) {
+          extendedPRThreadContext.iterationContext = { changeTrackingId: iterId };
+          body.pullRequestThreadContext = extendedPRThreadContext;
+        } else if (extendedPRThreadContext.filePath) {
+          // We have a file path/range but no valid iteration id - include only the range
+          body.threadContext = comment.threadContext;
+        }
+      } catch (e) {
+        // If anything goes wrong, avoid sending pullRequestThreadContext to prevent 400 errors
+        console.log('\u26a0\ufe0f Failed to build extended pullRequestThreadContext, falling back to threadContext only');
+        body.threadContext = comment.threadContext;
       }
+    } else if (pullRequestThreadContext && !comment.threadContext) {
+      // If we only have iteration info but no file range, avoid sending it (can cause errors)
+      // and rely on regular PR-level comments instead
+      // Do nothing here - body.threadContext already set when comment.threadContext is undefined
     }
 
     const response = await this.safeFetch(url, {

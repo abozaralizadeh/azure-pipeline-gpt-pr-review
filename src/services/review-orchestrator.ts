@@ -408,62 +408,75 @@ export class ReviewOrchestrator {
     // Post individual file comments with improved inline commenting
     console.log(`💬 Processing ${reviewResults.length} review results for commenting...`);
     
+    // Collect inline comments per file so we can coalesce contiguous lines into ranges
+    const inlineCommentsByFile: Map<string, any[]> = new Map();
+
     for (const result of reviewResults) {
-      console.log(`🔍 Processing review result with ${result.review_comments.length} comments`);
-
       for (const comment of result.review_comments) {
-        // Normalize logging for missing lines
-        const lineDisplay = comment.line ?? 'N/A';
+        if (!comment || comment.file === 'PR_CONTEXT') continue;
+        if (!comment.line || typeof comment.line !== 'number' || comment.line <= 0) continue;
 
-        // If this is a PR-level comment, skip inline posting and let summary handle it
-        if (comment.file === 'PR_CONTEXT') {
-          console.log(`🔍 Skipping PR-level comment (summary context): type=${comment.type} file=${comment.file} line=${lineDisplay}`);
-          continue; // Skip inline posting for PR-level comments
+        // Skip duplicates early
+        if (this.isDuplicateComment(comment, existingComments)) continue;
+
+        const filePath = comment.file.startsWith('/') ? comment.file : '/' + comment.file;
+        if (!inlineCommentsByFile.has(filePath)) inlineCommentsByFile.set(filePath, []);
+        inlineCommentsByFile.get(filePath)!.push(comment);
+      }
+    }
+
+    // For each file, sort comments and coalesce contiguous line numbers into ranges
+    for (const [filePath, comments] of inlineCommentsByFile.entries()) {
+      // Sort by line ascending
+      comments.sort((a: any, b: any) => (a.line || 0) - (b.line || 0));
+
+      // Build ranges: each range is { startLine, endLine, comments: [...] }
+      const ranges: Array<{ startLine: number; endLine: number; comments: any[] }> = [];
+
+      for (const comment of comments) {
+        const ln = comment.line as number;
+        if (ranges.length === 0) {
+          ranges.push({ startLine: ln, endLine: ln, comments: [comment] });
+          continue;
         }
 
-        console.log(`🔍 Processing comment: ${comment.type} for ${comment.file} at line ${lineDisplay}`);
-
-        // Check if this is a fixed issue - if so, we might want to continue the thread
-        if (comment.is_fixed) {
-          console.log(`✅ Found fixed issue for ${comment.file} at line ${comment.line}, posting positive feedback`);
+        const last = ranges[ranges.length - 1];
+        if (ln <= last.endLine + 1) {
+          // contiguous or overlapping - extend range and push comment
+          last.endLine = Math.max(last.endLine, ln);
+          last.comments.push(comment);
         } else {
-          // Check if similar comment already exists
-          if (this.isDuplicateComment(comment, existingComments)) {
-            console.log(`📝 Similar comment already exists for ${comment.file} at line ${lineDisplay}, skipping`);
-            continue;
-          }
+          // start new range
+          ranges.push({ startLine: ln, endLine: ln, comments: [comment] });
         }
+      }
 
+      // Post each range as either single-line inline comments or a ranged inline comment
+      for (const range of ranges) {
         try {
-          if (comment.line && comment.line > 0) {
-            // Post as inline comment with enhanced formatting
-            const formattedComment = this.formatInlineComment(comment);
-            console.log(`💬 Posting inline comment for ${comment.file} at line ${comment.line}`);
-            console.log(`💬 Comment content: ${formattedComment.substring(0, 100)}...`);
-            
-            await this.azureDevOpsService.addInlineComment(
-              comment.file,
-              formattedComment,
-              comment.line,
-              true // Always use right side (modified file)
-            );
-            console.log(`✅ Posted inline comment for ${comment.file} at line ${comment.line}`);
+          if (range.startLine === range.endLine) {
+            // Single-line range: post the single comment (if multiple comments on same line, combine them)
+            const commentsOnLine = range.comments;
+            const mergedText = commentsOnLine.map((c: any) => this.formatInlineComment(c)).join('\n\n---\n\n');
+            console.log(`💬 Posting inline comment for ${filePath} at line ${range.startLine}`);
+            await this.azureDevOpsService.addInlineComment(filePath, mergedText, range.startLine, true);
+            console.log(`✅ Posted inline comment for ${filePath} at line ${range.startLine}`);
           } else {
-            // Skip comments without valid line numbers to avoid posting irrelevant comments
-            console.log(`⏭️ Skipping comment without valid line number: ${comment.type} - ${comment.comment?.substring(0, 50)}...`);
-            console.log(`⏭️ Line number: ${comment.line} (0 means no valid line found)`);
-            console.log(`⏭️ This prevents posting comments on wrong lines`);
-            continue;
+            // Multi-line contiguous range: use ranged inline comment for better anchoring
+            const mergedText = range.comments.map((c: any) => this.formatInlineComment(c)).join('\n\n---\n\n');
+            console.log(`💬 Posting ranged inline comment for ${filePath} lines ${range.startLine}-${range.endLine}`);
+            await this.azureDevOpsService.addInlineCommentWithRange(filePath, mergedText, range.startLine, range.endLine, true);
+            console.log(`✅ Posted ranged inline comment for ${filePath} lines ${range.startLine}-${range.endLine}`);
           }
         } catch (error: any) {
-          console.error(`❌ Error posting comment for ${comment.file}:`, error.message);
-          // Fallback: try to post as general comment
+          console.error(`❌ Error posting inline comment for ${filePath} lines ${range.startLine}-${range.endLine}:`, error.message);
+          // Fallback: post general comment for the file
           try {
-            const fallbackComment = `**File: ${comment.file}**\n\n${this.formatComment(comment)}`;
+            const fallbackComment = `**File: ${filePath}**\n\n${range.comments.map((c: any) => this.formatComment(c)).join('\n\n')}`;
             await this.azureDevOpsService.addGeneralComment(fallbackComment);
-            console.log(`✅ Posted fallback general comment for ${comment.file}`);
+            console.log(`✅ Posted fallback general comment for ${filePath}`);
           } catch (fallbackError: any) {
-            console.error(`❌ Fallback comment also failed for ${comment.file}:`, fallbackError.message);
+            console.error(`❌ Fallback comment also failed for ${filePath}:`, fallbackError.message);
           }
         }
       }
