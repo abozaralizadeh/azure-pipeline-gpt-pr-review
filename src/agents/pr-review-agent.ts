@@ -391,7 +391,6 @@ Respond with JSON:
           comment: commentBody,
           type: "bug",
           confidence: 1.0,
-          suggestion: this.mergeSuggestions(formattedIssues),
           is_new_issue: true
         });
       }
@@ -412,10 +411,10 @@ Respond with JSON:
 
 File: ${state.current_file}
 
-CHANGED LINE BLOCKS (lines prefixed with ">>" were modified in this PR; lines with "  " are nearby context for reference):
+CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " are nearby context for reference):
 ${changedLinesContext}
 
-IMPORTANT: Only comment on lines prefixed with ">>". Context lines are for understanding only.
+IMPORTANT: Only comment on lines prefixed with "+". Context lines are for understanding only.
 
 CRITICAL RULES - READ CAREFULLY:
 1. YOU CAN ONLY COMMENT ON THE LINES LISTED ABOVE - these are the ONLY lines that were changed
@@ -550,15 +549,14 @@ CRITICAL REQUIREMENTS:
 
             state.review_comments.push({
               file: state.current_file || "unknown",
-              line: lineNumber,
-              comment: commentBody,
-              type: primaryIssue.type,
-              confidence: Math.max(...issues.map((issue: any) => issue.confidence ?? this.reviewThreshold)),
-              suggestion: this.mergeSuggestions(issues),
-              is_new_issue: issues.every((issue: any) => issue.is_new_issue !== false)
-            });
-          }
-        }
+          line: lineNumber,
+          comment: commentBody,
+          type: primaryIssue.type,
+          confidence: Math.max(...issues.map((issue: any) => issue.confidence ?? this.reviewThreshold)),
+          is_new_issue: issues.every((issue: any) => issue.is_new_issue !== false)
+        });
+      }
+    }
       }
 
       // Add fixed issues as positive feedback
@@ -751,10 +749,10 @@ CRITICAL REQUIREMENTS:
     return blocks.map(block => {
       const header = `Lines ${block.start}-${block.end}`;
       const code = block.lines.map(line => {
-        const prefix = line.changed ? '>>' : '  ';
-        return `${prefix} ${line.number.toString().padStart(4, ' ')} | ${line.text}`;
+        const prefix = line.changed ? '+' : ' ';
+        return `${prefix}${line.number.toString().padStart(5, ' ')} | ${line.text}`;
       }).join('\n');
-      return `${header}\n\`\`\`ts\n${code}\n\`\`\``;
+      return `${header}\n\`\`\`diff\n${code}\n\`\`\``;
     }).join('\n\n');
   }
 
@@ -771,27 +769,10 @@ CRITICAL REQUIREMENTS:
       return `**${index + 1}. ${kind} (${severity})**\n${description}${suggestion}`;
     });
 
-    const snippet = `\`\`\`ts\n>> ${lineNumber}: ${lineContent}\n\`\`\``;
+    const snippet = `\`\`\`diff\n+ ${lineNumber}: ${lineContent}\n\`\`\``;
     return `${parts.join('\n\n')}\n\n${snippet}`;
   }
 
-  private mergeSuggestions(issues: any[]): string | undefined {
-    if (!issues || issues.length === 0) {
-      return undefined;
-    }
-
-    const suggestions = issues
-      .map((issue: any) => issue.suggestion)
-      .filter((text: any): text is string => typeof text === 'string' && text.trim().length > 0);
-
-    if (suggestions.length === 0) {
-      return undefined;
-    }
-
-    const unique = Array.from(new Set(suggestions.map(s => s.trim())));
-    return unique.join('\n\n');
-  }
-  
   private isGibberish(line: string): boolean {
     const trimmed = line.trim();
     
@@ -1193,13 +1174,13 @@ CRITICAL REQUIREMENTS:
 
 File: ${state.current_file}
 
-CHANGED LINE BLOCKS (lines prefixed with ">>" were modified in this PR; lines with "  " provide nearby context):
+CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " provide nearby context):
 ${changedLinesContext}
 
-IMPORTANT: ONLY analyze lines prefixed with ">>". Context lines are for reference and must not be flagged unless they are also changed.
+IMPORTANT: ONLY analyze lines prefixed with "+". Context lines are for reference and must not be flagged unless they are also changed.
 
 CRITICAL RULES - READ CAREFULLY:
-1. Evaluate ONLY the modified lines (prefixed with ">>")
+1. Evaluate ONLY the modified lines (prefixed with "+")
 2. Provide precise line numbers from the modified file
 3. Recommend actionable remediations for each finding
 4. If no security vulnerabilities exist in the modified lines, return an empty security_issues array
@@ -1305,7 +1286,6 @@ CRITICAL REQUIREMENTS:
               comment: commentBody,
               type: "security",
               confidence: Math.max(...formatted.map((item: any) => item.confidence)),
-              suggestion: this.mergeSuggestions(formatted),
               is_new_issue: issues.every((issue: any) => issue.is_new_issue !== false)
             });
           }
