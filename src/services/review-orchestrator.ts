@@ -210,33 +210,19 @@ export class ReviewOrchestrator {
             const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
             const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
 
-            const sourceLines = (sourceContent.content || '').split('\n');
-            const targetLines = (targetContent.content || '').split('\n');
-            const maxLines = Math.max(sourceLines.length, targetLines.length);
+            const diffResult = this.azureDevOpsService.buildUnifiedDiffFromContent(
+              filePath,
+              targetContent.content || '',
+              sourceContent.content || ''
+            );
 
-            // Build a single hunk unified-style diff so the agent can parse changed lines
-            const diffLines: string[] = [];
-            diffLines.push(`@@ -1,${targetLines.length} +1,${sourceLines.length} @@`);
-            for (let i = 0; i < maxLines; i++) {
-              const t = targetLines[i];
-              const s = sourceLines[i];
-              if (t === s) {
-                diffLines.push(` ${t === undefined ? '' : t}`);
-              } else {
-                if (t !== undefined) diffLines.push(`- ${t}`);
-                if (s !== undefined) diffLines.push(`+ ${s}`);
-              }
+            if (diffResult.diff) {
+              fileDiff = diffResult.diff;
+              lineMapping = diffResult.lineMapping;
+              console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
+            } else {
+              console.log(`ℹ️ Fallback diff generation found no differences for ${filePath}`);
             }
-
-            const fallbackDiff = diffLines.join('\n');
-            // Replace fileDiff and allow the agent to compute added lines from it
-            fileDiff = fallbackDiff;
-            try {
-              lineMapping = this.azureDevOpsService.createLineMappingFromDiff(fileDiff);
-            } catch (mappingErr) {
-              console.log(`⚠️ Failed to build line mapping from fallback diff for ${filePath}:`, mappingErr instanceof Error ? mappingErr.message : String(mappingErr));
-            }
-            console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
           } catch (fallbackErr) {
             console.log(`⚠️ Failed to build fallback diff for ${filePath}:`, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
           }
@@ -258,30 +244,19 @@ export class ReviewOrchestrator {
             const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
             const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
 
-            const sourceLines = (sourceContent.content || '').split('\n');
-            const targetLines = (targetContent.content || '').split('\n');
-            const maxLines = Math.max(sourceLines.length, targetLines.length);
+            const diffResult = this.azureDevOpsService.buildUnifiedDiffFromContent(
+              filePath,
+              targetContent.content || '',
+              sourceContent.content || ''
+            );
 
-            const diffLines: string[] = [];
-            diffLines.push(`@@ -1,${targetLines.length} +1,${sourceLines.length} @@`);
-            for (let i = 0; i < maxLines; i++) {
-              const t = targetLines[i];
-              const s = sourceLines[i];
-              if (t === s) {
-                diffLines.push(` ${t === undefined ? '' : t}`);
-              } else {
-                if (t !== undefined) diffLines.push(`- ${t}`);
-                if (s !== undefined) diffLines.push(`+ ${s}`);
-              }
+            if (diffResult.diff) {
+              fileDiff = diffResult.diff;
+              lineMapping = diffResult.lineMapping;
+              console.log(`🔧 Replaced fileDiff with fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
+            } else {
+              console.log(`ℹ️ Fallback diff replacement found no differences for ${filePath}`);
             }
-
-            fileDiff = diffLines.join('\n');
-            try {
-              lineMapping = this.azureDevOpsService.createLineMappingFromDiff(fileDiff);
-            } catch (mappingErr) {
-              console.log(`⚠️ Failed to rebuild line mapping after fallback diff for ${filePath}:`, mappingErr instanceof Error ? mappingErr.message : String(mappingErr));
-            }
-            console.log(`🔧 Replaced fileDiff with fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
           }
         } catch (err) {
           console.log(`⚠️ Error while checking/building fallback diff for ${filePath}:`, err instanceof Error ? err.message : String(err));

@@ -153,6 +153,18 @@ export class AzureDevOpsService {
     console.log(`🔍 Base URL: "${testUrl}"`);
   }
 
+  public buildUnifiedDiffFromContent(filePath: string, originalContent: string, modifiedContent: string): { diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> } {
+    const diffText = this.buildSimpleUnifiedDiff(filePath, originalContent, modifiedContent);
+    if (!diffText) {
+      return { diff: '', lineMapping: new Map() };
+    }
+
+    return {
+      diff: diffText,
+      lineMapping: this.createLineMappingFromDiff(diffText)
+    };
+  }
+
   private getApiUrl(endpoint: string): string {
     const repoIdentifier = this.repositoryId || this.repositoryName;
     const base = `${this.collectionUri.replace(/\/$/, '')}/${this.projectId}`;
