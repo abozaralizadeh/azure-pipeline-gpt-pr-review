@@ -60,6 +60,13 @@ export interface FileContent {
   isBinary: boolean;
 }
 
+type DiffEntry = {
+  type: 'equal' | 'delete' | 'insert';
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+};
+
 export class AzureDevOpsService {
   private collectionUri: string;
   private projectId: string;
@@ -545,7 +552,7 @@ export class AzureDevOpsService {
       const targetBranch = prDetails.targetRefName.replace('refs/heads/', '');
       
       // Try to get changes using the Git diff API
-      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${encodeURIComponent(targetBranch)}&baseVersionType=branch&targetVersion=${encodeURIComponent(sourceBranch)}&targetVersionType=branch&api-version=7.0`;
       
       const response = await this.safeFetch(diffUrl, {
         headers: this.getAuthHeaders()
@@ -1145,7 +1152,7 @@ export class AzureDevOpsService {
       const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
       
       // Try to get diff using the Git diff API
-      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${encodeURIComponent(targetBranch)}&baseVersionType=branch&targetVersion=${encodeURIComponent(sourceBranch)}&targetVersionType=branch&api-version=7.0`;
       console.log(`🔍 Diff URL: ${diffUrl}`);
       
       const response = await fetch(diffUrl, {
@@ -1172,24 +1179,8 @@ export class AzureDevOpsService {
             const targetContentRes = await this.getFileContent(cleanPath, targetBranch);
             const sourceContentRes = await this.getFileContent(cleanPath, sourceBranch.replace('refs/heads/', ''));
 
-            const targetLines = (targetContentRes.content || '').split('\n');
-            const sourceLines = (sourceContentRes.content || '').split('\n');
-
-            const maxLines = Math.max(targetLines.length, sourceLines.length);
-            const diffLines: string[] = [];
-
-            // Build a minimal unified-style diff so the review agent can extract changed lines
-            for (let i = 0; i < maxLines; i++) {
-              const t = targetLines[i];
-              const s = sourceLines[i];
-              if (t === s) continue;
-
-              if (t !== undefined) diffLines.push(`- ${t}`);
-              if (s !== undefined) diffLines.push(`+ ${s}`);
-            }
-
-            if (diffLines.length > 0) {
-              const diffText = diffLines.join('\n');
+            const diffText = this.buildSimpleUnifiedDiff(cleanPath, targetContentRes.content || '', sourceContentRes.content || '');
+            if (diffText) {
               return diffText;
             }
           } catch (diffBuildErr) {
@@ -1227,7 +1218,7 @@ export class AzureDevOpsService {
       const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
       
       // Request the diff for the single file directly. Including the path dramatically reduces payload size.
-      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&path=${encodeURIComponent('/' + cleanPath)}&api-version=7.0`;
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${encodeURIComponent(targetBranch)}&baseVersionType=branch&targetVersion=${encodeURIComponent(sourceBranch)}&targetVersionType=branch&path=${encodeURIComponent('/' + cleanPath)}&api-version=7.0`;
 
       const response = await this.safeFetch(diffUrl, {
         headers: this.getAuthHeaders(),
@@ -1270,6 +1261,183 @@ export class AzureDevOpsService {
       console.log(`⚠️ Failed to get diff with line numbers:`, errorMessage);
       return { diff: '', lineMapping: new Map() };
     }
+  }
+
+  private buildSimpleUnifiedDiff(filePath: string, originalContent: string, modifiedContent: string): string | null {
+    if (originalContent === modifiedContent) {
+      return null;
+    }
+
+    const normalize = (text: string) => text.replace(/\r\n/g, '\n');
+    const originalLines = normalize(originalContent).split('\n');
+    const modifiedLines = normalize(modifiedContent).split('\n');
+
+    const entries = this.computeDiffEntries(originalLines, modifiedLines);
+    if (!entries.some(entry => entry.type !== 'equal')) {
+      return null;
+    }
+
+    const contextSize = 3;
+    const pathHeader = filePath.startsWith('/') ? filePath : `/${filePath}`;
+    const diffLines: string[] = [
+      `diff --git a${pathHeader} b${pathHeader}`,
+      `--- a${pathHeader}`,
+      `+++ b${pathHeader}`
+    ];
+
+    const total = entries.length;
+    let index = 0;
+
+    while (index < total) {
+      while (index < total && entries[index].type === 'equal') {
+        index++;
+      }
+
+      if (index >= total) {
+        break;
+      }
+
+      const hunkStart = Math.max(0, index - contextSize);
+      let hunkEnd = index;
+      let trailingEquals = 0;
+
+      while (hunkEnd < total) {
+        if (entries[hunkEnd].type === 'equal') {
+          trailingEquals++;
+          if (trailingEquals > contextSize) {
+            break;
+          }
+        } else {
+          trailingEquals = 0;
+        }
+        hunkEnd++;
+      }
+
+      const slice = entries.slice(hunkStart, hunkEnd);
+      const oldStart = this.findHunkStartLine(slice, entries, hunkStart, 'oldLine');
+      const newStart = this.findHunkStartLine(slice, entries, hunkStart, 'newLine');
+
+      let oldCount = 0;
+      let newCount = 0;
+      const hunkLines: string[] = [];
+
+      for (const entry of slice) {
+        if (entry.type === 'equal') {
+          hunkLines.push(` ${entry.text}`);
+          oldCount++;
+          newCount++;
+        } else if (entry.type === 'delete') {
+          hunkLines.push(`-${entry.text}`);
+          oldCount++;
+        } else {
+          hunkLines.push(`+${entry.text}`);
+          newCount++;
+        }
+      }
+
+      diffLines.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+      diffLines.push(...hunkLines);
+
+      index = hunkEnd;
+    }
+
+    return diffLines.join('\n');
+  }
+
+  private findHunkStartLine(slice: DiffEntry[], allEntries: DiffEntry[], sliceStartIndex: number, key: 'oldLine' | 'newLine'): number {
+    const first = slice.find(entry => typeof entry[key] === 'number');
+    if (first && typeof first[key] === 'number') {
+      return first[key] as number;
+    }
+
+    for (let i = sliceStartIndex - 1; i >= 0; i--) {
+      const value = allEntries[i][key];
+      if (typeof value === 'number') {
+        return (value as number) + 1;
+      }
+    }
+
+    return 0;
+  }
+
+  private computeDiffEntries(originalLines: string[], modifiedLines: string[]): DiffEntry[] {
+    const m = originalLines.length;
+    const n = modifiedLines.length;
+
+    const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        if (originalLines[i] === modifiedLines[j]) {
+          dp[i][j] = dp[i + 1][j + 1] + 1;
+        } else {
+          dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+    }
+
+    const entries: DiffEntry[] = [];
+    let i = 0;
+    let j = 0;
+    let originalLineNumber = 1;
+    let modifiedLineNumber = 1;
+
+    while (i < m && j < n) {
+      if (originalLines[i] === modifiedLines[j]) {
+        entries.push({
+          type: 'equal',
+          text: originalLines[i],
+          oldLine: originalLineNumber,
+          newLine: modifiedLineNumber
+        });
+        i++;
+        j++;
+        originalLineNumber++;
+        modifiedLineNumber++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        entries.push({
+          type: 'delete',
+          text: originalLines[i],
+          oldLine: originalLineNumber,
+          newLine: null
+        });
+        i++;
+        originalLineNumber++;
+      } else {
+        entries.push({
+          type: 'insert',
+          text: modifiedLines[j],
+          oldLine: null,
+          newLine: modifiedLineNumber
+        });
+        j++;
+        modifiedLineNumber++;
+      }
+    }
+
+    while (i < m) {
+      entries.push({
+        type: 'delete',
+        text: originalLines[i],
+        oldLine: originalLineNumber,
+        newLine: null
+      });
+      i++;
+      originalLineNumber++;
+    }
+
+    while (j < n) {
+      entries.push({
+        type: 'insert',
+        text: modifiedLines[j],
+        oldLine: null,
+        newLine: modifiedLineNumber
+      });
+      j++;
+      modifiedLineNumber++;
+    }
+
+    return entries;
   }
 
   private buildUnifiedDiffFromBlocks(blocks: any[], filePath: string): string | null {
@@ -1377,12 +1545,16 @@ export class AzureDevOpsService {
       const sourceContent = await this.getFileContent(filePath, sourceBranch.replace('refs/heads/', ''));
       
       if (targetContent.content !== sourceContent.content) {
-        console.log(`✅ File content differs between branches, proceeding with review`);
+        console.log(`✅ File content differs between branches, generating fallback diff`);
+        const diffText = this.buildSimpleUnifiedDiff(filePath, targetContent.content || '', sourceContent.content || '');
+        if (diffText) {
+          return diffText;
+        }
         return `File content differs between ${targetBranch} and ${sourceBranch}`;
-      } else {
-        console.log(`✅ File content is identical between branches`);
-        return '';
       }
+      
+      console.log(`✅ File content is identical between branches`);
+      return '';
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.log(`⚠️ Alternative diff approach failed:`, errorMessage);
