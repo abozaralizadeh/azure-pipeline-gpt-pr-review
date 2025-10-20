@@ -23,6 +23,8 @@ export class ReviewOrchestrator {
   private reviewThreshold: number;
   private enableCodeSuggestions: boolean;
   private enableSecurityScanning: boolean;
+  private fileLineMappings: Map<string, Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }>> = new Map();
+  private fallbackGeneralCommentFiles: Set<string> = new Set();
 
   constructor(
     httpsAgent: Agent,
@@ -138,6 +140,7 @@ export class ReviewOrchestrator {
   ): Promise<PRReviewStateType[]> {
     const reviewResults: PRReviewStateType[] = [];
     let totalLLMCalls = 0;
+    this.fileLineMappings.clear();
 
     for (const filePath of changedFiles) {
       try {
@@ -166,7 +169,7 @@ export class ReviewOrchestrator {
           continue;
         }
         let fileDiff = '';
-        let lineMapping = new Map();
+        let lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> = new Map();
         
         try {
           // Normalize source branch name (strip refs/heads/) for API calls
@@ -228,6 +231,11 @@ export class ReviewOrchestrator {
             const fallbackDiff = diffLines.join('\n');
             // Replace fileDiff and allow the agent to compute added lines from it
             fileDiff = fallbackDiff;
+            try {
+              lineMapping = this.azureDevOpsService.createLineMappingFromDiff(fileDiff);
+            } catch (mappingErr) {
+              console.log(`⚠️ Failed to build line mapping from fallback diff for ${filePath}:`, mappingErr instanceof Error ? mappingErr.message : String(mappingErr));
+            }
             console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
           } catch (fallbackErr) {
             console.log(`⚠️ Failed to build fallback diff for ${filePath}:`, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
@@ -268,6 +276,11 @@ export class ReviewOrchestrator {
             }
 
             fileDiff = diffLines.join('\n');
+            try {
+              lineMapping = this.azureDevOpsService.createLineMappingFromDiff(fileDiff);
+            } catch (mappingErr) {
+              console.log(`⚠️ Failed to rebuild line mapping after fallback diff for ${filePath}:`, mappingErr instanceof Error ? mappingErr.message : String(mappingErr));
+            }
             console.log(`🔧 Replaced fileDiff with fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
           }
         } catch (err) {
@@ -291,6 +304,8 @@ export class ReviewOrchestrator {
         };
 
         // Run the review agent
+        const normalizedFilePath = filePath.startsWith('/') ? filePath : '/' + filePath;
+        this.fileLineMappings.set(normalizedFilePath, lineMapping);
         // Debug logging: file sizes and diff info before LLM call
         try {
           console.log(`🔎 Preparing to call review agent for ${filePath}`);
@@ -384,6 +399,7 @@ export class ReviewOrchestrator {
     finalSummary: any
   ): Promise<void> {
     console.log("💬 Posting review results to Azure DevOps...");
+    this.fallbackGeneralCommentFiles.clear();
 
     // Get existing comments to avoid duplicates
     let existingComments: any[] = [];
@@ -416,12 +432,25 @@ export class ReviewOrchestrator {
         if (!comment || comment.file === 'PR_CONTEXT') continue;
         if (!comment.line || typeof comment.line !== 'number' || comment.line <= 0) continue;
 
+        const normalizedFilePath = comment.file.startsWith('/') ? comment.file : '/' + comment.file;
+        comment.file = normalizedFilePath;
+
+        const lineMapping = this.fileLineMappings.get(normalizedFilePath);
+        if (lineMapping && lineMapping.size > 0) {
+          const lineInfo = lineMapping.get(comment.line);
+          if (!lineInfo || !lineInfo.isAdded) {
+            console.log(`⏭️  Skipping comment on unchanged line ${comment.line} in ${normalizedFilePath}`);
+            continue;
+          }
+        }
+
         // Skip duplicates early
         if (this.isDuplicateComment(comment, existingComments)) continue;
 
-        const filePath = comment.file.startsWith('/') ? comment.file : '/' + comment.file;
-        if (!inlineCommentsByFile.has(filePath)) inlineCommentsByFile.set(filePath, []);
-        inlineCommentsByFile.get(filePath)!.push(comment);
+        if (!inlineCommentsByFile.has(normalizedFilePath)) {
+          inlineCommentsByFile.set(normalizedFilePath, []);
+        }
+        inlineCommentsByFile.get(normalizedFilePath)!.push(comment);
       }
     }
 
@@ -470,13 +499,18 @@ export class ReviewOrchestrator {
           }
         } catch (error: any) {
           console.error(`❌ Error posting inline comment for ${filePath} lines ${range.startLine}-${range.endLine}:`, error.message);
-          // Fallback: post general comment for the file
-          try {
-            const fallbackComment = `**File: ${filePath}**\n\n${range.comments.map((c: any) => this.formatComment(c)).join('\n\n')}`;
-            await this.azureDevOpsService.addGeneralComment(fallbackComment);
-            console.log(`✅ Posted fallback general comment for ${filePath}`);
-          } catch (fallbackError: any) {
-            console.error(`❌ Fallback comment also failed for ${filePath}:`, fallbackError.message);
+          const fallbackKey = filePath;
+          if (!this.fallbackGeneralCommentFiles.has(fallbackKey)) {
+            try {
+              const fallbackComment = `**File: ${filePath}**\n\n${range.comments.map((c: any) => this.formatComment(c)).join('\n\n')}`;
+              await this.azureDevOpsService.addGeneralComment(fallbackComment);
+              this.fallbackGeneralCommentFiles.add(fallbackKey);
+              console.log(`✅ Posted fallback general comment for ${filePath}`);
+            } catch (fallbackError: any) {
+              console.error(`❌ Fallback comment also failed for ${filePath}:`, fallbackError.message);
+            }
+          } else {
+            console.log(`⚠️ Skipping additional fallback general comment for ${filePath} (already posted)`);
           }
         }
       }

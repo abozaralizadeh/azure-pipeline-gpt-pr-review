@@ -94,7 +94,7 @@ export class AdvancedPRReviewAgent {
     fileDiff: string,
     fileName: string,
     prContext: any,
-    lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>
+    lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext?: boolean }>
   ): Promise<PRReviewStateType> {
     const initialState: PRReviewStateType = {
       messages: [],
@@ -322,7 +322,7 @@ Respond with JSON:
     }
   }
 
-  private async reviewFile(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>): Promise<PRReviewStateType> {
+  private async reviewFile(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext?: boolean }>): Promise<PRReviewStateType> {
     if (this.llmCalls >= this.maxLLMCalls || !state.file_content || !state.file_diff) {
       return state;
     }
@@ -677,49 +677,40 @@ CRITICAL REQUIREMENTS:
   }
   
   private isGibberish(line: string): boolean {
-    // Check for lines with random characters, no spaces, and no recognizable patterns
     const trimmed = line.trim();
     
-    // Skip empty lines
     if (!trimmed) return false;
-    
-    // Skip comments
     if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) return false;
-    
-    // Check for gibberish patterns
-    const hasRandomChars = /^[a-z]{10,}$/i.test(trimmed); // Long strings of random letters
-    const hasMixedGibberish = /^[a-z0-9]{8,}[^a-z0-9\s]/.test(trimmed); // Mixed random chars
-    const hasNoSpaces = !trimmed.includes(' ') && trimmed.length > 15; // Long strings without spaces
-    const hasTypoPattern = /^[a-z]+\s+[a-z]+\s+[a-z0-9]+$/i.test(trimmed); // Pattern like "has_issuexz czdxcsdmnvcasjh ascjkb"
-    const hasBrokenCode = /^[a-z_]+\s+[a-z0-9]+\s*$/.test(trimmed) && !trimmed.includes('=') && !trimmed.includes(':'); // Broken variable declarations
-    
-    return hasRandomChars || hasMixedGibberish || hasNoSpaces || hasTypoPattern || hasBrokenCode;
+
+    // If the line contains common code punctuation, treat it as legitimate code.
+    if (/[.;(){}=]/.test(trimmed)) return false;
+
+    const alphaOnly = trimmed.replace(/[_\d]/g, '');
+    const longRandomLetters = /^[a-z]{12,}$/i.test(alphaOnly);
+    const alphaNumericMix = /[a-z]{5,}\d{3,}/i.test(trimmed.replace(/_/g, ''));
+    const spacedRandomWords = /^[a-z]{4,}\s+[a-z]{4,}\s+[a-z0-9]{4,}$/i.test(trimmed);
+
+    return longRandomLetters || alphaNumericMix || spacedRandomWords;
   }
   
   private hasObviousSyntaxError(line: string): boolean {
     const trimmed = line.trim();
-    
-    // Check for obvious syntax errors
-    const hasUnclosedString = (trimmed.match(/"/g) || []).length % 2 !== 0;
-    const hasUnclosedParen = (trimmed.match(/\(/g) || []).length !== (trimmed.match(/\)/g) || []).length;
-    const hasUnclosedBracket = (trimmed.match(/\[/g) || []).length !== (trimmed.match(/\]/g) || []).length;
-    const hasUnclosedBrace = (trimmed.match(/\{/g) || []).length !== (trimmed.match(/\}/g) || []).length;
-    const hasInvalidChars = /[^\w\s\(\)\[\]\{\}\.,;:=\+\-\*\/%<>!&|^~`'"@#$\\]/.test(trimmed);
-    
-    return hasUnclosedString || hasUnclosedParen || hasUnclosedBracket || hasUnclosedBrace || hasInvalidChars;
+    if (!trimmed) return false;
+
+    const hasInvalidNegation = trimmed.includes('?!');
+    const hasDoubleQuestion = /\?\?/.test(trimmed);
+    const usesInvalidTypeKeyword = /^\s*int\s+[A-Za-z_]/.test(trimmed);
+
+    return hasInvalidNegation || hasDoubleQuestion || usesInvalidTypeKeyword;
   }
   
   private isIncompleteStructure(line: string): boolean {
     const trimmed = line.trim();
     
-    // Check for incomplete structures
-    const hasIncompleteObject = trimmed.includes('{') && !trimmed.includes('}');
-    const hasIncompleteArray = trimmed.includes('[') && !trimmed.includes(']');
-    const hasIncompleteFunction = trimmed.includes('function') && !trimmed.includes('{');
-    const hasIncompleteIf = trimmed.includes('if') && !trimmed.includes('{') && !trimmed.includes(';');
-    const hasIncompleteAssignment = trimmed.includes('=') && !trimmed.includes(';') && !trimmed.includes(',');
-    
-    return hasIncompleteObject || hasIncompleteArray || hasIncompleteFunction || hasIncompleteIf || hasIncompleteAssignment;
+    const opensBlockWithoutClose = trimmed.endsWith('{') && !trimmed.includes('}');
+    const ifWithoutBody = /^if\s*\([^)]*\)\s*$/.test(trimmed);
+
+    return opensBlockWithoutClose || ifWithoutBody;
   }
 
   private findBestLineNumber(issue: any, diffAnalysis: any, fileContent: string): number {
@@ -990,7 +981,7 @@ CRITICAL REQUIREMENTS:
     return false;
   }
 
-  private async securityScan(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>): Promise<PRReviewStateType> {
+  private async securityScan(state: PRReviewStateType, lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext?: boolean }>): Promise<PRReviewStateType> {
     if (this.llmCalls >= this.maxLLMCalls) {
       return state;
     }

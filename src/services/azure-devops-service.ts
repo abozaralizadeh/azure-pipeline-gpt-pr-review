@@ -1219,53 +1219,51 @@ export class AzureDevOpsService {
     }
   }
 
-  public async getFileDiffWithLineNumbers(filePath: string, targetBranch: string, sourceBranch: string): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }> }> {
+  public async getFileDiffWithLineNumbers(filePath: string, targetBranch: string, sourceBranch: string): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
     console.log(`🔍 Getting file diff with line numbers for: ${filePath}`);
     
     try {
       // Clean up the file path
       const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
       
-      // Get the raw diff content
-      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&api-version=7.0`;
-      
-      const response = await fetch(diffUrl, {
+      // Request the diff for the single file directly. Including the path dramatically reduces payload size.
+      const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${targetBranch}&targetVersion=${sourceBranch}&path=${encodeURIComponent('/' + cleanPath)}&api-version=7.0`;
+
+      const response = await this.safeFetch(diffUrl, {
         headers: this.getAuthHeaders(),
         agent: this.httpsAgent
       });
 
       if (response.ok) {
         const diffData = await response.json();
-        
-        // Look for the specific file in the diff
-        const fileChange = diffData.changes?.find((change: any) => {
+
+        const fileChange = Array.isArray(diffData.changes) ? diffData.changes.find((change: any) => {
           const changePath = change.item?.path || '';
           const cleanChangePath = changePath.startsWith('/') ? changePath.substring(1) : changePath;
           return cleanChangePath === cleanPath;
-        });
+        }) : undefined;
 
-        if (fileChange && fileChange.item) {
-          // Get the actual diff content for this file
-          const fileDiffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/items?path=${encodeURIComponent(cleanPath)}&versionDescriptor.version=${sourceBranch}&api-version=7.0&includeContent=true&$format=text`;
-          
-          const fileResponse = await fetch(fileDiffUrl, {
-            headers: Object.assign({}, this.getAuthHeaders(), { 'Content-Type': 'text/plain' }),
-            agent: this.httpsAgent
-          });
+        if (fileChange) {
+          // Azure DevOps returns either a unified diff string (`changeText`) or structured line diff blocks.
+          let diffContent: string | null = null;
 
-          if (fileResponse.ok) {
-            const fileContent = await fileResponse.text();
-            const lineMapping = this.parseDiffLineNumbers(fileContent);
-            
+          if (typeof fileChange.changeText === 'string' && fileChange.changeText.trim().length > 0) {
+            diffContent = fileChange.changeText;
+          } else if (Array.isArray(fileChange.changeContent?.lineDiffBlocks)) {
+            diffContent = this.buildUnifiedDiffFromBlocks(fileChange.changeContent.lineDiffBlocks, fileChange.item?.path || cleanPath);
+          }
+
+          if (diffContent) {
+            const lineMapping = this.createLineMappingFromDiff(diffContent);
             return {
-              diff: fileContent,
-              lineMapping: lineMapping
+              diff: diffContent,
+              lineMapping
             };
           }
         }
       }
-      
-      // Fallback: return empty diff
+
+      console.log(`⚠️ Diff API did not return diff text for ${filePath}, falling back to empty diff`);
       return { diff: '', lineMapping: new Map() };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1274,8 +1272,49 @@ export class AzureDevOpsService {
     }
   }
 
-  private parseDiffLineNumbers(diffContent: string): Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }> {
-    const lineMapping = new Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean }>();
+  private buildUnifiedDiffFromBlocks(blocks: any[], filePath: string): string | null {
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      return null;
+    }
+
+    const pathHeader = filePath.startsWith('/') ? filePath : `/${filePath}`;
+    const diffLines: string[] = [
+      `diff --git a${pathHeader} b${pathHeader}`,
+      `--- a${pathHeader}`,
+      `+++ b${pathHeader}`
+    ];
+
+    for (const block of blocks) {
+      const originalStart = Number(block.originalLineNumber || block.originalLine || 0);
+      const originalCount = Number(block.originalLineCount || block.originalLines || 0);
+      const modifiedStart = Number(block.modifiedLineNumber || block.modifiedLine || 0);
+      const modifiedCount = Number(block.modifiedLineCount || block.modifiedLines || 0);
+
+      if (!originalStart && !modifiedStart) {
+        continue;
+      }
+
+      diffLines.push(`@@ -${originalStart},${originalCount} +${modifiedStart},${modifiedCount} @@`);
+
+      if (Array.isArray(block.lines)) {
+        for (const line of block.lines) {
+          const text = typeof line.line === 'string' ? line.line : line.lineText ?? '';
+          const changeType = typeof line.changeType === 'string' ? line.changeType.toLowerCase() : line.changeType;
+
+          if (changeType === 1 || changeType === 'add') diffLines.push(`+${text}`);
+          else if (changeType === 2 || changeType === 'delete') diffLines.push(`-${text}`);
+          else diffLines.push(` ${text}`);
+        }
+      } else if (typeof block.partialLine === 'string') {
+        diffLines.push(` ${block.partialLine}`);
+      }
+    }
+
+    return diffLines.join('\n');
+  }
+
+  public createLineMappingFromDiff(diffContent: string): Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> {
+    const lineMapping = new Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }>();
     
     if (!diffContent) {
       return lineMapping;
@@ -1299,30 +1338,26 @@ export class AzureDevOpsService {
       } else if (line.startsWith('+')) {
         // Added line
         modifiedLine++;
-        lineMapping.set(diffLine, {
+        lineMapping.set(modifiedLine, {
           originalLine: originalLine,
           modifiedLine: modifiedLine,
           isAdded: true,
-          isRemoved: false
+          isRemoved: false,
+          isContext: false
         });
       } else if (line.startsWith('-')) {
         // Removed line
         originalLine++;
-        lineMapping.set(diffLine, {
-          originalLine: originalLine,
-          modifiedLine: modifiedLine,
-          isAdded: false,
-          isRemoved: true
-        });
       } else if (line.startsWith(' ')) {
         // Context line
         originalLine++;
         modifiedLine++;
-        lineMapping.set(diffLine, {
+        lineMapping.set(modifiedLine, {
           originalLine: originalLine,
           modifiedLine: modifiedLine,
           isAdded: false,
-          isRemoved: false
+          isRemoved: false,
+          isContext: true
         });
       }
     }
@@ -1786,7 +1821,15 @@ export class AzureDevOpsService {
       'CHANGELOG',
       'CONTRIBUTING',
       'SECURITY',
-      'CODEOWNERS'
+      'CODEOWNERS',
+      '.env',
+      '.env.local',
+      '.gitignore',
+      '.dockerignore',
+      '.eslintignore',
+      '.npmrc',
+      '.yarnrc',
+      '.nvmrc'
     ]);
 
     const cleaned = new Set<string>();
