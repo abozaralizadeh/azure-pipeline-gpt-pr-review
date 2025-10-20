@@ -314,6 +314,7 @@ Respond with JSON:
         });
       }
 
+      this.llmCalls++;
       state.llm_calls = this.llmCalls;
       return state;
     } catch (error) {
@@ -329,6 +330,7 @@ Respond with JSON:
 
     // Parse the diff to extract line numbers and changes
     let diffAnalysis = this.analyzeDiff(state.file_diff || '');
+    const fileLines = (state.file_content || '').split('\n');
 
     // If analyzeDiff found no changed lines but a lineMapping was provided by the orchestrator,
     // use that mapping to construct changedContent and addedLines as a fallback so we can still
@@ -336,7 +338,6 @@ Respond with JSON:
     if ((diffAnalysis.changedContent.length === 0 || diffAnalysis.addedLines.length === 0) && lineMapping && lineMapping.size > 0) {
       try {
         console.log(`🔄 Fallback: building changedContent from provided lineMapping (entries: ${lineMapping.size})`);
-        const fileLines = (state.file_content || '').split('\n');
         const addedLines: number[] = [];
         const changedContent: string[] = [];
 
@@ -361,30 +362,45 @@ Respond with JSON:
     }
     
     // First, check for obvious syntax errors in the changed content
-  const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown');
+    const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown', fileLines);
     if (syntaxErrors.length > 0) {
       console.log(`🚨 Detected ${syntaxErrors.length} syntax errors in changed content`);
+      const groupedSyntax = new Map<number, Array<{lineNumber: number, message: string, suggestion: string}>>();
+
       for (const error of syntaxErrors) {
+        if (!groupedSyntax.has(error.lineNumber)) {
+          groupedSyntax.set(error.lineNumber, []);
+        }
+        groupedSyntax.get(error.lineNumber)!.push(error);
+      }
+
+      for (const [lineNumber, issues] of groupedSyntax.entries()) {
+        const formattedIssues = issues.map(issue => ({
+          type: 'bug',
+          severity: 'critical',
+          description: issue.message,
+          suggestion: issue.suggestion,
+          confidence: 1.0
+        }));
+
+        const commentBody = this.combineIssuesForComment(formattedIssues, fileLines[lineNumber - 1] || '', lineNumber);
+
         state.review_comments.push({
           file: state.current_file || "unknown",
-          line: error.lineNumber,
-          comment: `SYNTAX ERROR: ${error.message}`,
+          line: lineNumber,
+          comment: commentBody,
           type: "bug",
           confidence: 1.0,
-          suggestion: error.suggestion,
+          suggestion: this.mergeSuggestions(formattedIssues),
           is_new_issue: true
         });
       }
     }
     
-    // Create a focused context with ONLY the changed lines
-    const changedLinesContext = diffAnalysis.changedContent.map((line, index) => {
-      const lineNumber = diffAnalysis.addedLines[index];
-      return `Line ${lineNumber}: ${line}`;
-    }).join('\n');
+    const changedLineBlocks = this.buildChangedLineBlocks(diffAnalysis.addedLines, fileLines);
+    const changedLinesContext = this.renderBlocksForPrompt(changedLineBlocks);
 
-    console.log(`🔍 Changed lines context for AI:`);
-    console.log(changedLinesContext);
+    console.log(`🔍 Prepared ${changedLineBlocks.length} changed-line blocks for AI context`);
 
     // If no changed lines, skip the review
     if (diffAnalysis.changedContent.length === 0) {
@@ -396,13 +412,10 @@ Respond with JSON:
 
 File: ${state.current_file}
 
-CHANGED LINES ONLY (these are the ONLY lines you can comment on):
+CHANGED LINE BLOCKS (lines prefixed with ">>" were modified in this PR; lines with "  " are nearby context for reference):
 ${changedLinesContext}
 
-FULL FILE CONTEXT (for reference only):
-${state.file_content}
-
-IMPORTANT: You are ONLY seeing the changed lines as the primary source for comments. Use the FULL FILE CONTEXT only to disambiguate snippets — DO NOT invent new issues outside the changed lines.
+IMPORTANT: Only comment on lines prefixed with ">>". Context lines are for understanding only.
 
 CRITICAL RULES - READ CAREFULLY:
 1. YOU CAN ONLY COMMENT ON THE LINES LISTED ABOVE - these are the ONLY lines that were changed
@@ -483,6 +496,8 @@ CRITICAL REQUIREMENTS:
       
       // Add review comments to state with STRICT validation for changed lines only
       if (review.issues && Array.isArray(review.issues)) {
+        const groupedIssues = new Map<number, any[]>();
+
         review.issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
             let chosenLine = 0;
@@ -507,16 +522,10 @@ CRITICAL REQUIREMENTS:
             }
 
             if (chosenLine && chosenLine > 0) {
-              // Attach as an inline comment
-              state.review_comments.push({
-                file: state.current_file || "unknown",
-                line: chosenLine,
-                comment: issue.description,
-                type: issue.type,
-                confidence: issue.confidence,
-                suggestion: issue.suggestion,
-                is_new_issue: issue.is_new_issue !== false // Default to true if not specified
-              });
+              if (!groupedIssues.has(chosenLine)) {
+                groupedIssues.set(chosenLine, []);
+              }
+              groupedIssues.get(chosenLine)!.push(issue);
             } else {
               // Fall back to PR-level comment so the reviewer still sees the issue
               console.log(`⚠️ Issue missing or outside changed lines: creating PR-level summary (issue line: ${issue.line_number})`);
@@ -533,6 +542,23 @@ CRITICAL REQUIREMENTS:
             }
           }
         });
+
+        if (groupedIssues.size > 0) {
+          for (const [lineNumber, issues] of groupedIssues.entries()) {
+            const commentBody = this.combineIssuesForComment(issues, fileLines[lineNumber - 1] || '', lineNumber);
+            const primaryIssue = issues[0];
+
+            state.review_comments.push({
+              file: state.current_file || "unknown",
+              line: lineNumber,
+              comment: commentBody,
+              type: primaryIssue.type,
+              confidence: Math.max(...issues.map((issue: any) => issue.confidence ?? this.reviewThreshold)),
+              suggestion: this.mergeSuggestions(issues),
+              is_new_issue: issues.every((issue: any) => issue.is_new_issue !== false)
+            });
+          }
+        }
       }
 
       // Add fixed issues as positive feedback
@@ -560,6 +586,7 @@ CRITICAL REQUIREMENTS:
         });
       }
 
+      this.llmCalls++;
       state.llm_calls = this.llmCalls;
       return state;
     } catch (error) {
@@ -625,7 +652,7 @@ CRITICAL REQUIREMENTS:
     return { addedLines, removedLines, modifiedLines, changedContent };
   }
 
-  private detectSyntaxErrors(changedContent: string[], addedLines: number[], fileName: string): Array<{lineNumber: number, message: string, suggestion: string}> {
+  private detectSyntaxErrors(changedContent: string[], addedLines: number[], fileName: string, fileLines: string[]): Array<{lineNumber: number, message: string, suggestion: string}> {
     const errors: Array<{lineNumber: number, message: string, suggestion: string}> = [];
     
     if (!changedContent || changedContent.length === 0 || !addedLines || addedLines.length === 0) {
@@ -661,7 +688,7 @@ CRITICAL REQUIREMENTS:
       }
       
       // Check for incomplete code structures
-      if (this.isIncompleteStructure(line)) {
+      if (this.isIncompleteStructure(line, lineNumber, fileLines)) {
         errors.push({
           lineNumber: lineNumber,
           message: `Incomplete code structure: "${line}"`,
@@ -674,6 +701,95 @@ CRITICAL REQUIREMENTS:
     
     console.log(`✅ Syntax error detection complete: ${errors.length} errors found`);
     return errors;
+  }
+
+  private buildChangedLineBlocks(addedLines: number[], fileLines: string[], contextWindow: number = 2): Array<{ start: number; end: number; lines: Array<{ number: number; text: string; changed: boolean }> }> {
+    if (!addedLines || addedLines.length === 0) {
+      return [];
+    }
+
+    const sorted = Array.from(new Set(addedLines)).sort((a, b) => a - b);
+    const changedSet = new Set(sorted);
+    const blocks: Array<{ start: number; end: number; lines: Array<{ number: number; text: string; changed: boolean }> }> = [];
+    let blockStart = sorted[0];
+    let blockEnd = sorted[0];
+
+    const pushBlock = (start: number, end: number) => {
+      const startWithContext = Math.max(1, start - contextWindow);
+      const endWithContext = Math.min(fileLines.length, end + contextWindow);
+      const lines: Array<{ number: number; text: string; changed: boolean }> = [];
+      for (let line = startWithContext; line <= endWithContext; line++) {
+        lines.push({
+          number: line,
+          text: fileLines[line - 1] ?? '',
+          changed: changedSet.has(line)
+        });
+      }
+      blocks.push({ start: startWithContext, end: endWithContext, lines });
+    };
+
+    for (let i = 1; i < sorted.length; i++) {
+      const current = sorted[i];
+      if (current <= blockEnd + 1) {
+        blockEnd = current;
+      } else {
+        pushBlock(blockStart, blockEnd);
+        blockStart = current;
+        blockEnd = current;
+      }
+    }
+
+    pushBlock(blockStart, blockEnd);
+    return blocks;
+  }
+
+  private renderBlocksForPrompt(blocks: Array<{ start: number; end: number; lines: Array<{ number: number; text: string; changed: boolean }> }>): string {
+    if (!blocks || blocks.length === 0) {
+      return '';
+    }
+
+    return blocks.map(block => {
+      const header = `Lines ${block.start}-${block.end}`;
+      const code = block.lines.map(line => {
+        const prefix = line.changed ? '>>' : '  ';
+        return `${prefix} ${line.number.toString().padStart(4, ' ')} | ${line.text}`;
+      }).join('\n');
+      return `${header}\n\`\`\`ts\n${code}\n\`\`\``;
+    }).join('\n\n');
+  }
+
+  private combineIssuesForComment(issues: any[], lineContent: string, lineNumber: number): string {
+    if (!issues || issues.length === 0) {
+      return '';
+    }
+
+    const parts = issues.map((issue: any, index: number) => {
+      const kind = issue.type ? issue.type.toUpperCase() : 'ISSUE';
+      const severity = issue.severity ? issue.severity.toUpperCase() : 'N/A';
+      const description = issue.description || 'No description provided.';
+      const suggestion = issue.suggestion ? `\n\n💡 ${issue.suggestion}` : '';
+      return `**${index + 1}. ${kind} (${severity})**\n${description}${suggestion}`;
+    });
+
+    const snippet = `\`\`\`ts\n>> ${lineNumber}: ${lineContent}\n\`\`\``;
+    return `${parts.join('\n\n')}\n\n${snippet}`;
+  }
+
+  private mergeSuggestions(issues: any[]): string | undefined {
+    if (!issues || issues.length === 0) {
+      return undefined;
+    }
+
+    const suggestions = issues
+      .map((issue: any) => issue.suggestion)
+      .filter((text: any): text is string => typeof text === 'string' && text.trim().length > 0);
+
+    if (suggestions.length === 0) {
+      return undefined;
+    }
+
+    const unique = Array.from(new Set(suggestions.map(s => s.trim())));
+    return unique.join('\n\n');
   }
   
   private isGibberish(line: string): boolean {
@@ -704,13 +820,58 @@ CRITICAL REQUIREMENTS:
     return hasInvalidNegation || hasDoubleQuestion || usesInvalidTypeKeyword;
   }
   
-  private isIncompleteStructure(line: string): boolean {
+  private isIncompleteStructure(line: string, lineNumber: number, fileLines: string[]): boolean {
     const trimmed = line.trim();
     
-    const opensBlockWithoutClose = trimmed.endsWith('{') && !trimmed.includes('}');
-    const ifWithoutBody = /^if\s*\([^)]*\)\s*$/.test(trimmed);
+    if (!trimmed) {
+      return false;
+    }
 
-    return opensBlockWithoutClose || ifWithoutBody;
+    if (trimmed.endsWith('{') && !trimmed.includes('}')) {
+      return !this.hasMatchingClosingBrace(lineNumber, fileLines);
+    }
+
+    if (/^if\s*\([^)]*\)\s*$/.test(trimmed)) {
+      const nextLineIndex = this.findNextNonEmptyLineIndex(lineNumber, fileLines);
+      if (nextLineIndex > 0) {
+        const nextLine = fileLines[nextLineIndex - 1].trim();
+        if (nextLine.startsWith('{') || nextLine.startsWith('return') || nextLine.startsWith('throw')) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  private hasMatchingClosingBrace(lineNumber: number, fileLines: string[]): boolean {
+    let depth = 0;
+    let opened = false;
+    for (let i = lineNumber - 1; i < fileLines.length; i++) {
+      const line = fileLines[i];
+      for (const char of line) {
+        if (char === '{') {
+          depth++;
+          opened = true;
+        } else if (char === '}' && opened) {
+          depth--;
+        }
+      }
+      if (opened && depth <= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private findNextNonEmptyLineIndex(currentLine: number, fileLines: string[]): number {
+    for (let i = currentLine; i < fileLines.length; i++) {
+      if ((fileLines[i] || '').trim().length > 0) {
+        return i + 1;
+      }
+    }
+    return -1;
   }
 
   private findBestLineNumber(issue: any, diffAnalysis: any, fileContent: string): number {
@@ -1016,14 +1177,11 @@ CRITICAL REQUIREMENTS:
       }
     }
 
-    // Create a focused context with ONLY the changed lines for security analysis
-    const changedLinesContext = diffAnalysis.changedContent.map((line, index) => {
-      const lineNumber = diffAnalysis.addedLines[index];
-      return `Line ${lineNumber}: ${line}`;
-    }).join('\n');
+    const securityFileLines = (state.file_content || '').split('\n');
+    const securityBlocks = this.buildChangedLineBlocks(diffAnalysis.addedLines, securityFileLines);
+    const changedLinesContext = this.renderBlocksForPrompt(securityBlocks);
 
-    console.log(`🔍 Security scan - Changed lines context for AI:`);
-    console.log(changedLinesContext);
+    console.log(`🔍 Security scan - prepared ${securityBlocks.length} changed-line blocks for AI context`);
 
     // If no changed lines, skip the security scan
     if (diffAnalysis.changedContent.length === 0) {
@@ -1031,49 +1189,30 @@ CRITICAL REQUIREMENTS:
       return state;
     }
 
-    const securityPrompt = `Perform a security analysis of ONLY the following changed lines from a Pull Request.
+    const securityPrompt = `Perform a security analysis of the modified code lines below.
 
 File: ${state.current_file}
 
-CHANGED LINES ONLY (these are the ONLY lines you can analyze):
+CHANGED LINE BLOCKS (lines prefixed with ">>" were modified in this PR; lines with "  " provide nearby context):
 ${changedLinesContext}
 
-IMPORTANT: You are ONLY seeing the changed lines. Do NOT assume there is other code in the file.
+IMPORTANT: ONLY analyze lines prefixed with ">>". Context lines are for reference and must not be flagged unless they are also changed.
 
 CRITICAL RULES - READ CAREFULLY:
-1. YOU CAN ONLY ANALYZE THE LINES LISTED ABOVE - these are the ONLY lines that were changed
-2. DO NOT analyze any other lines in the file, even if they have security issues
-3. If the changed lines don't have any security issues, return an empty security_issues array
-4. Focus ONLY on security problems in the actual changes made
-5. Use the EXACT line numbers provided above
+1. Evaluate ONLY the modified lines (prefixed with ">>")
+2. Provide precise line numbers from the modified file
+3. Recommend actionable remediations for each finding
+4. If no security vulnerabilities exist in the modified lines, return an empty security_issues array
 
-CRITICAL: Look for these OBVIOUS security problems in the CHANGED LINES ONLY:
-1. HARDCODED SECRETS - API keys, passwords, tokens in plain text
-2. LOGGING SENSITIVE DATA - console.log with secrets, API keys, user data
-3. INSECURE AUTHENTICATION - missing validation, weak checks
-4. INPUT VALIDATION - missing sanitization, direct user input usage
-5. SQL INJECTION - direct string concatenation in queries
-6. XSS VULNERABILITIES - unescaped user input in HTML/JS
-
-IMPORTANT INSTRUCTIONS:
-1. ONLY analyze code that was actually CHANGED in this PR (the lines shown above)
-2. Use the EXACT line numbers from the changed lines list
-3. Focus on security issues in the specific changes made
-4. Provide relevant security recommendations that match the actual code being changed
-5. PRIORITIZE obvious security vulnerabilities over minor issues
-6. If no security issues are found in the changed lines, return empty security_issues array
-
-Look for security vulnerabilities in the CHANGED code including:
+Assess the changed code for:
 1. Hardcoded secrets and credentials
 2. Logging of sensitive information
-3. Input validation issues
+3. Input validation or sanitization gaps
 4. SQL injection vulnerabilities
 5. XSS vulnerabilities
-6. Insecure authentication
-7. Authorization bypasses
-8. Insecure dependencies
-9. Prompt injection vulnerabilities
-10. Input sanitization issues
+6. Insecure authentication or authorization checks
+7. Use of insecure dependencies or APIs
+8. Prompt injection risks when interacting with LLMs
 
 For each security issue, provide the EXACT line number from the changed lines list where the vulnerability occurs.
 
@@ -1112,6 +1251,8 @@ CRITICAL REQUIREMENTS:
       });
       
       if (securityAnalysis.security_issues && Array.isArray(securityAnalysis.security_issues)) {
+        const groupedSecurityIssues = new Map<number, any[]>();
+
         securityAnalysis.security_issues.forEach((issue: any) => {
           if (issue.confidence >= this.reviewThreshold) {
             let chosenLine = 0;
@@ -1136,22 +1277,42 @@ CRITICAL REQUIREMENTS:
             }
 
             if (chosenLine && chosenLine > 0) {
-              console.log(`✅ Security issue line ${chosenLine} is in changed lines - processing`);
-              state.review_comments.push({
-                file: state.current_file || "unknown",
-                line: chosenLine,
-                comment: `SECURITY: ${issue.description}`,
-                type: "security",
-                confidence: issue.confidence,
-                suggestion: issue.recommendation
-              });
+              if (!groupedSecurityIssues.has(chosenLine)) {
+                groupedSecurityIssues.set(chosenLine, []);
+              }
+              groupedSecurityIssues.get(chosenLine)!.push(issue);
             } else {
               console.log(`❌ Security issue could not be mapped to a changed line - SKIPPING inline comment`);
             }
           }
         });
+
+        if (groupedSecurityIssues.size > 0) {
+          for (const [lineNumber, issues] of groupedSecurityIssues.entries()) {
+            const formatted = issues.map((issue: any) => ({
+              type: 'security',
+              severity: issue.severity || 'medium',
+              description: issue.description,
+              suggestion: issue.recommendation,
+              confidence: issue.confidence ?? this.reviewThreshold
+            }));
+
+            const commentBody = this.combineIssuesForComment(formatted, securityFileLines[lineNumber - 1] || '', lineNumber);
+
+            state.review_comments.push({
+              file: state.current_file || "unknown",
+              line: lineNumber,
+              comment: commentBody,
+              type: "security",
+              confidence: Math.max(...formatted.map((item: any) => item.confidence)),
+              suggestion: this.mergeSuggestions(formatted),
+              is_new_issue: issues.every((issue: any) => issue.is_new_issue !== false)
+            });
+          }
+        }
       }
 
+      this.llmCalls++;
       state.llm_calls = this.llmCalls;
       return state;
     } catch (error) {
@@ -1211,6 +1372,7 @@ Format as JSON:
         });
       }
 
+      this.llmCalls++;
       state.llm_calls = this.llmCalls;
       return state;
     } catch (error) {
@@ -1258,6 +1420,7 @@ Provide a final recommendation in JSON format:
         confidence: finalAssessment.confidence
       };
 
+      this.llmCalls++;
       state.llm_calls = this.llmCalls;
       return state;
     } catch (error) {
