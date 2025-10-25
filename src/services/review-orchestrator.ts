@@ -417,6 +417,9 @@ export class ReviewOrchestrator {
             console.log(`⏭️  Skipping comment on unchanged line ${comment.line} in ${normalizedFilePath}`);
             continue;
           }
+
+          // Normalize the comment line to the actual modified line Azure DevOps expects.
+          comment.line = lineInfo.modifiedLine;
         }
 
         // Skip duplicates early
