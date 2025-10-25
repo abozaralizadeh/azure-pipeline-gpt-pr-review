@@ -12,7 +12,7 @@
   "demands": [],
   "version": {
     "Major": "2",
-    "Minor": "53",
+    "Minor": "55",
     "Patch": "0"
   },
   "minimumAgentVersion": "1.95.0",
@@ -25,6 +25,22 @@
       "defaultValue": "",
       "required": true,
       "helpMarkDown": "Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com/)"
+    },
+    {
+      "name": "azure_openai_api_version",
+      "type": "string",
+      "label": "Azure OpenAI API Version",
+      "defaultValue": "2024-02-15-preview",
+      "required": false,
+      "helpMarkDown": "API version to use when calling Azure OpenAI (e.g., 2024-08-01-preview for GPT-5)"
+    },
+    {
+      "name": "azure_openai_use_responses_api",
+      "type": "boolean",
+      "label": "Use Responses API",
+      "defaultValue": "false",
+      "required": false,
+      "helpMarkDown": "Enable this option for models that require the Responses API (e.g., GPT-4.1, GPT-5)."
     },
     {
       "name": "azure_openai_api_key",

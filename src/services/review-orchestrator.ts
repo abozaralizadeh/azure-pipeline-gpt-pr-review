@@ -1,8 +1,8 @@
 import * as tl from "azure-pipelines-task-lib/task";
 import { Agent } from 'node:https';
 import { AdvancedPRReviewAgent, PRReviewStateType } from '../agents/pr-review-agent';
-import { AzureDevOpsService, PRDetails, FileContent } from './azure-devops-service';
-import { getTargetBranchName } from '../utils';
+import { AzureDevOpsService, PRDetails } from './azure-devops-service';
+import { getTargetBranchName, getSourceBranchName } from '../utils';
 
 export interface ReviewResult {
   success: boolean;
@@ -34,7 +34,9 @@ export class ReviewOrchestrator {
     maxLLMCalls: number = 100,
     reviewThreshold: number = 0.7,
     enableCodeSuggestions: boolean = true,
-    enableSecurityScanning: boolean = true
+    enableSecurityScanning: boolean = true,
+    azureOpenAIApiVersion: string = '2024-02-15-preview',
+    useResponsesApi: boolean = false
   ) {
     this.httpsAgent = httpsAgent;
     this.azureDevOpsService = new AzureDevOpsService(httpsAgent);
@@ -43,7 +45,9 @@ export class ReviewOrchestrator {
       azureOpenAIKey,
       deploymentName,
       maxLLMCalls,
-      reviewThreshold
+      reviewThreshold,
+      azureOpenAIApiVersion,
+      useResponsesApi
     );
     this.maxLLMCalls = maxLLMCalls;
     this.reviewThreshold = reviewThreshold;
@@ -141,6 +145,10 @@ export class ReviewOrchestrator {
     const reviewResults: PRReviewStateType[] = [];
     let totalLLMCalls = 0;
     this.fileLineMappings.clear();
+    const normalizedSource =
+      getSourceBranchName() ??
+      (prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName) ??
+      targetBranch;
 
     for (const filePath of changedFiles) {
       try {
@@ -172,94 +180,20 @@ export class ReviewOrchestrator {
         let lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> = new Map();
         
         try {
-          // Normalize source branch name (strip refs/heads/) for API calls
-          const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
-
-          // Try to get diff with line numbers first
-          const diffResult = await this.azureDevOpsService.getFileDiffWithLineNumbers(filePath, targetBranch, cleanSource);
+          const diffResult = await this.azureDevOpsService.getDiffForFile(filePath, targetBranch, normalizedSource, {
+            targetContent: fileContent.content || ''
+          });
           fileDiff = diffResult.diff;
           lineMapping = diffResult.lineMapping;
-          console.log(`✅ Got file diff with line mapping for ${filePath}`);
         } catch (diffError) {
           const errorMessage = diffError instanceof Error ? diffError.message : String(diffError);
-          console.log(`⚠️ Failed to get diff with line numbers for ${filePath}:`, errorMessage);
-          
-          // Fallback to regular diff
-          try {
-            // Try again with normalized source branch
-            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
-            fileDiff = await this.azureDevOpsService.getFileDiff(filePath, targetBranch, cleanSource);
-            console.log(`✅ Got regular file diff for ${filePath}`);
-          } catch (regularDiffError) {
-            const regularErrorMessage = regularDiffError instanceof Error ? regularDiffError.message : String(regularDiffError);
-            console.log(`⚠️ Failed to get regular diff for ${filePath}:`, regularErrorMessage);
-            console.log(`🔄 Proceeding with review using file content only`);
-            fileDiff = `File ${filePath} has changes (diff unavailable)`;
-          }
+          console.log(`⚠️ Failed to retrieve diff for ${filePath}:`, errorMessage);
+          fileDiff = `File ${filePath} has changes (diff unavailable)`;
         }
 
         if (fileContent.isBinary) {
           console.log(`⏭️  Skipping binary file content: ${filePath}`);
           continue;
-        }
-
-        // If diff is empty or no lineMapping entries, build a best-effort unified diff from file contents
-        if ((!fileDiff || fileDiff.length === 0) || (lineMapping && (lineMapping.size === 0))) {
-          try {
-            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
-            const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
-            const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
-
-            const diffResult = this.azureDevOpsService.buildUnifiedDiffFromContent(
-              filePath,
-              targetContent.content || '',
-              sourceContent.content || ''
-            );
-
-            if (diffResult.diff) {
-              fileDiff = diffResult.diff;
-              lineMapping = diffResult.lineMapping;
-              console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
-            } else {
-              console.log(`ℹ️ Fallback diff generation found no differences for ${filePath}`);
-            }
-          } catch (fallbackErr) {
-            console.log(`⚠️ Failed to build fallback diff for ${filePath}:`, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
-          }
-        }
-
-        // Additionally: if the diff exists but doesn't look like a unified diff (no hunks or +/- lines),
-        // build a fallback unified diff to ensure the agent can extract changed lines.
-        try {
-          const hasHunk = fileDiff && /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(fileDiff);
-          // Only consider explicit unified-diff markers (+ or - at start of a line).
-          // Previously we treated lines starting with a space as a sign of unified diff which
-          // produced false positives when raw file content had leading spaces. Ensure we only
-          // treat plus/minus prefixes as diff indicators so the fallback builder runs when
-          // fileDiff is actually raw file content.
-          const hasPlusMinus = fileDiff && /^(\+|\-)/m.test(fileDiff);
-          if (fileDiff && !(hasHunk || hasPlusMinus)) {
-            console.log(`🔍 Diff for ${filePath} doesn't contain unified hunks or +/-, building fallback unified diff`);
-            const cleanSource = prDetails.sourceRefName ? prDetails.sourceRefName.replace('refs/heads/', '') : prDetails.sourceRefName;
-            const sourceContent = await this.azureDevOpsService.getFileContent(filePath, cleanSource);
-            const targetContent = await this.azureDevOpsService.getFileContent(filePath, targetBranch);
-
-            const diffResult = this.azureDevOpsService.buildUnifiedDiffFromContent(
-              filePath,
-              targetContent.content || '',
-              sourceContent.content || ''
-            );
-
-            if (diffResult.diff) {
-              fileDiff = diffResult.diff;
-              lineMapping = diffResult.lineMapping;
-              console.log(`🔧 Replaced fileDiff with fallback unified diff for ${filePath} (size: ${fileDiff.length} chars)`);
-            } else {
-              console.log(`ℹ️ Fallback diff replacement found no differences for ${filePath}`);
-            }
-          }
-        } catch (err) {
-          console.log(`⚠️ Error while checking/building fallback diff for ${filePath}:`, err instanceof Error ? err.message : String(err));
         }
 
         // Check if we've exceeded LLM call limit

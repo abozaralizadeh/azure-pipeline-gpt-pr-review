@@ -67,6 +67,11 @@ type DiffEntry = {
   newLine: number | null;
 };
 
+type DiffRetrievalOptions = {
+  targetContent?: string;
+  sourceContent?: string;
+};
+
 export class AzureDevOpsService {
   private collectionUri: string;
   private projectId: string;
@@ -163,6 +168,41 @@ export class AzureDevOpsService {
       diff: diffText,
       lineMapping: this.createLineMappingFromDiff(diffText)
     };
+  }
+
+  private async buildFallbackDiff(
+    filePath: string,
+    targetBranch: string,
+    sourceBranch: string,
+    options: DiffRetrievalOptions
+  ): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
+    try {
+      const targetContent =
+        options.targetContent ??
+        (await this.getFileContent(filePath, targetBranch)).content ??
+        '';
+      const sourceContent =
+        options.sourceContent ??
+        (await this.getFileContent(filePath, sourceBranch)).content ??
+        '';
+
+      if (targetContent === sourceContent) {
+        console.log(`✅ File content is identical between ${targetBranch} and ${sourceBranch} for ${filePath}`);
+        return { diff: '', lineMapping: new Map() };
+      }
+
+      const fallback = this.buildUnifiedDiffFromContent(filePath, targetContent, sourceContent);
+      if (fallback.diff) {
+        console.log(`🔧 Built fallback unified diff for ${filePath} (size: ${fallback.diff.length} chars)`);
+      } else {
+        console.log(`ℹ️ Fallback diff generation found no textual differences for ${filePath}`);
+      }
+      return fallback;
+    } catch (fallbackErr) {
+      const errorMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      console.log(`⚠️ Failed to build fallback diff for ${filePath}:`, errorMessage);
+      return { diff: '', lineMapping: new Map() };
+    }
   }
 
   private getApiUrl(endpoint: string): string {
@@ -1155,7 +1195,80 @@ export class AzureDevOpsService {
     };
   }
 
-  public async getFileDiff(filePath: string, targetBranch: string, sourceBranch: string): Promise<string> {
+  public async getDiffForFile(
+    filePath: string,
+    targetBranch: string,
+    sourceBranch: string,
+    options: DiffRetrievalOptions = {}
+  ): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
+    const normalizedTarget = this.normalizeBranchName(targetBranch);
+    const normalizedSource = this.normalizeBranchName(sourceBranch);
+
+    let fileDiff = '';
+    let lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> = new Map();
+
+    try {
+      const diffResult = await this.getFileDiffWithLineNumbers(filePath, normalizedTarget, normalizedSource);
+      fileDiff = diffResult.diff;
+      lineMapping = diffResult.lineMapping;
+      console.log(`✅ Got file diff with line mapping for ${filePath}`);
+    } catch (diffError) {
+      const errorMessage = diffError instanceof Error ? diffError.message : String(diffError);
+      console.log(`⚠️ Failed to get diff with line numbers for ${filePath}:`, errorMessage);
+      try {
+        fileDiff = await this.getFileDiff(filePath, normalizedTarget, normalizedSource);
+        console.log(`✅ Got regular file diff for ${filePath}`);
+      } catch (regularDiffError) {
+        const regularErrorMessage = regularDiffError instanceof Error ? regularDiffError.message : String(regularDiffError);
+        console.log(`⚠️ Failed to get regular diff for ${filePath}:`, regularErrorMessage);
+      }
+    }
+
+    const ensured = await this.ensureUnifiedDiff(filePath, normalizedTarget, normalizedSource, fileDiff, lineMapping, options);
+    return ensured;
+  }
+
+  private normalizeBranchName(branch: string): string {
+    if (!branch) return branch;
+    return branch.replace('refs/heads/', '');
+  }
+
+  private hasUnifiedDiffMarkers(diff: string | undefined | null): boolean {
+    if (!diff) return false;
+    if (/@@ -\d+,?\d* \+\d+,?\d* @@/m.test(diff)) return true;
+    return /^(\+|\-)/m.test(diff);
+  }
+
+  private async ensureUnifiedDiff(
+    filePath: string,
+    targetBranch: string,
+    sourceBranch: string,
+    diff: string,
+    lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }>,
+    options: DiffRetrievalOptions
+  ): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
+    if (diff && (!lineMapping || lineMapping.size === 0)) {
+      lineMapping = this.createLineMappingFromDiff(diff);
+    }
+
+    if (this.hasUnifiedDiffMarkers(diff) && lineMapping && lineMapping.size > 0) {
+      return { diff, lineMapping };
+    }
+
+    const fallback = await this.buildFallbackDiff(filePath, targetBranch, sourceBranch, options);
+    if (fallback.diff) {
+      return fallback;
+    }
+
+    if (diff) {
+      return { diff, lineMapping };
+    }
+
+    console.log(`⚠️ No diff information available for ${filePath} even after fallback`);
+    return { diff: '', lineMapping: new Map() };
+  }
+
+  private async getFileDiff(filePath: string, targetBranch: string, sourceBranch: string): Promise<string> {
     console.log(`🔍 Getting file diff for: ${filePath}`);
     console.log(`🔍 Target branch: ${targetBranch}, Source branch: ${sourceBranch}`);
     
@@ -1167,10 +1280,10 @@ export class AzureDevOpsService {
       const diffUrl = `${this.collectionUri}${this.projectId}/_apis/git/repositories/${this.repositoryName}/diffs/commits?baseVersion=${encodeURIComponent(targetBranch)}&baseVersionType=branch&targetVersion=${encodeURIComponent(sourceBranch)}&targetVersionType=branch&api-version=7.0`;
       console.log(`🔍 Diff URL: ${diffUrl}`);
       
-      const response = await fetch(diffUrl, {
-          headers: this.getAuthHeaders(),
-          agent: this.httpsAgent
-        });
+      const response = await this.safeFetch(diffUrl, {
+        headers: this.getAuthHeaders(),
+        agent: this.httpsAgent
+      });
 
       if (response.ok) {
         const diff = await response.json();
@@ -1222,7 +1335,7 @@ export class AzureDevOpsService {
     }
   }
 
-  public async getFileDiffWithLineNumbers(filePath: string, targetBranch: string, sourceBranch: string): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
+  private async getFileDiffWithLineNumbers(filePath: string, targetBranch: string, sourceBranch: string): Promise<{ diff: string; lineMapping: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }> }> {
     console.log(`🔍 Getting file diff with line numbers for: ${filePath}`);
     
     try {

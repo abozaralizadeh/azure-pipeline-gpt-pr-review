@@ -107,6 +107,8 @@ variables:
 | `enable_code_suggestions` | boolean | ❌ | true | Enable AI code suggestions |
 | `enable_security_scanning` | boolean | ❌ | true | Enable security vulnerability scanning |
 | `support_self_signed_certificate` | boolean | ❌ | false | Support self-signed certificates |
+| `azure_openai_api_version` | string | ❌ | 2024-02-15-preview | Azure OpenAI API version (use newer previews for GPT-4.1 / GPT-5) |
+| `azure_openai_use_responses_api` | boolean | ❌ | false | Call the modern Responses API (required for GPT-4.1 and GPT-5 deployments) |
 
 ## 🔧 How It Works
 
@@ -204,6 +206,11 @@ The extension posts a comprehensive summary comment including:
 - Ensure the PR branch contains actual line modifications (not whitespace-only changes)
 - Check pipeline logs for `🔧 Built fallback unified diff` messages—these confirm the reviewer successfully reconstructed diff hunks
 - Verify the Azure DevOps build service has permission to call the PR diff APIs (`pullRequests/{id}/changes`, `diffs/commits`)
+
+#### Azure OpenAI 400 Bad Request
+- GPT-4.1/GPT-5 deployments require newer API versions (e.g., `2024-08-01-preview`) — set the `azure_openai_api_version` input accordingly
+- Enable the `azure_openai_use_responses_api` flag for models that only support the Responses API
+- Review the task logs for the exact error body — it will be surfaced when the request fails
 - Consider disabling code suggestions for large PRs
 
 #### Performance Issues
