@@ -15,6 +15,7 @@ An intelligent, AI-powered Pull Request reviewer for Azure DevOps that uses Azur
 - **Security Scanning**: Detects vulnerabilities like SQL injection, XSS, hardcoded secrets
 - **Style & Standards**: Ensures adherence to coding standards and best practices
 - **Test Coverage**: Analyzes test adequacy and suggests improvements
+- **Precise Diff Tracking**: Comments are anchored to the exact modified lines with automatic range selection, even when Azure DevOps omits diff hunks
 
 ### 🛠️ Azure DevOps Integration
 - **Inline Comments**: Posts specific feedback directly on code lines
@@ -198,6 +199,11 @@ The extension posts a comprehensive summary comment including:
 #### High LLM Usage
 - Reduce `max_llm_calls` if hitting limits
 - Adjust `review_threshold` to filter out low-confidence suggestions
+
+#### Comments Not Highlighting Diff Lines
+- Ensure the PR branch contains actual line modifications (not whitespace-only changes)
+- Check pipeline logs for `🔧 Built fallback unified diff` messages—these confirm the reviewer successfully reconstructed diff hunks
+- Verify the Azure DevOps build service has permission to call the PR diff APIs (`pullRequests/{id}/changes`, `diffs/commits`)
 - Consider disabling code suggestions for large PRs
 
 #### Performance Issues
