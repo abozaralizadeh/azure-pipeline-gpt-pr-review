@@ -319,6 +319,7 @@ export class ReviewOrchestrator {
     } catch (error) {
       console.log(`⚠️ Could not fetch existing comments, proceeding with new comments`);
     }
+    const existingCommentIndex = this.buildExistingCommentIndex(existingComments);
 
     // Post final summary as a general comment (only if no recent summary exists)
     const hasRecentSummary = this.hasRecentSummaryComment(existingComments);
@@ -357,7 +358,7 @@ export class ReviewOrchestrator {
         }
 
         // Skip duplicates early
-        if (this.isDuplicateComment(comment, existingComments)) continue;
+        if (this.isDuplicateComment(comment, existingComments, existingCommentIndex)) continue;
 
         if (!inlineCommentsByFile.has(normalizedFilePath)) {
           inlineCommentsByFile.set(normalizedFilePath, []);
@@ -448,11 +449,13 @@ export class ReviewOrchestrator {
     });
   }
 
-  private isDuplicateComment(newComment: any, existingComments: any[]): boolean {
+  private isDuplicateComment(newComment: any, existingComments: any[], existingIndex: Map<string, string[]>): boolean {
     // Only consider inline comments for duplicate detection
     if (!newComment.file || typeof newComment.line !== 'number' || newComment.line <= 0) return false;
 
     const normalizedNewFile = newComment.file.startsWith('/') ? newComment.file : '/' + newComment.file;
+    const normalizedKey = `${normalizedNewFile}|${newComment.line}`;
+    const normalizedNewContent = this.normalizeCommentContent(this.formatInlineComment(newComment));
 
     return existingComments.some(existingComment => {
       if (!existingComment.content) return false;
@@ -485,7 +488,16 @@ export class ReviewOrchestrator {
 
       const isNotResolved = !existingComment.isDeleted && existingComment.status !== 'resolved';
 
-      return isSameLocation && isSimilarType && isFromBuildService && isNotResolved;
+      if (!(isSameLocation && isSimilarType && isFromBuildService && isNotResolved)) {
+        return false;
+      }
+
+      const existingSet = existingIndex.get(normalizedKey);
+      if (!existingSet || existingSet.length === 0) {
+        return false;
+      }
+
+      return existingSet.some(existingContent => existingContent.includes(normalizedNewContent));
     });
   }
 
@@ -542,6 +554,48 @@ export class ReviewOrchestrator {
     }
 
     return formattedComment;
+  }
+
+  private buildExistingCommentIndex(existingComments: any[]): Map<string, string[]> {
+    const index = new Map<string, string[]>();
+
+    existingComments.forEach(existingComment => {
+      const filePath = existingComment.threadContext?.filePath;
+      const rightLine = existingComment.threadContext?.rightFileStart?.line || existingComment.threadContext?.rightFileEnd?.line;
+      if (!filePath || !rightLine) {
+        return;
+      }
+
+      const isFromBuildService = existingComment.author?.uniqueName?.toLowerCase()?.includes('build') ||
+                                 existingComment.author?.displayName?.toLowerCase()?.includes('build service');
+      if (!isFromBuildService) {
+        return;
+      }
+
+      const normalizedFile = filePath.startsWith('/') ? filePath : '/' + filePath;
+      const key = `${normalizedFile}|${rightLine}`;
+      const normalizedContent = this.normalizeCommentContent(existingComment.content || '');
+      if (!normalizedContent) {
+        return;
+      }
+
+      if (!index.has(key)) {
+        index.set(key, []);
+      }
+
+      index.get(key)!.push(normalizedContent);
+    });
+
+    return index;
+  }
+
+  private normalizeCommentContent(content: string): string {
+    return content
+      .toLowerCase()
+      .replace(/\*\*/g, '') // remove markdown bold markers
+      .replace(/[\s\r\n]+/g, ' ') // collapse whitespace
+      .replace(/[`*_>#-]/g, '') // remove other markdown artifacts
+      .trim();
   }
 
   private formatSummaryComment(summary: any): string {
