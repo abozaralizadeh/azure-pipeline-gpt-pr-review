@@ -1859,6 +1859,22 @@ export class AzureDevOpsService {
     console.log(`Comment ${commentId} deleted successfully`);
   }
 
+  public getRepository(): string {
+    return this.repositoryName;
+  }
+
+  public getProject(): string {
+    return this.projectId;
+  }
+
+  public getCollection(): string {
+    return this.collectionUri;
+  }
+
+  public getPullRequestIdValue(): string {
+    return this.pullRequestId;
+  }
+
   public async deleteExistingComments(): Promise<void> {
     try {
       console.log("Deleting existing comments from previous runs...");

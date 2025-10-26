@@ -3,6 +3,8 @@ import { Agent } from 'node:https';
 import { AdvancedPRReviewAgent, PRReviewStateType } from '../agents/pr-review-agent';
 import { AzureDevOpsService, PRDetails } from './azure-devops-service';
 import { getTargetBranchName, getSourceBranchName } from '../utils';
+import { MCPService } from './mcp-service';
+import { MCPServerConfig } from '../types/mcp';
 
 export interface ReviewResult {
   success: boolean;
@@ -23,6 +25,7 @@ export class ReviewOrchestrator {
   private reviewThreshold: number;
   private enableCodeSuggestions: boolean;
   private enableSecurityScanning: boolean;
+  private mcpService: MCPService;
   private fileLineMappings: Map<string, Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext: boolean }>> = new Map();
   private fallbackGeneralCommentFiles: Set<string> = new Set();
 
@@ -36,7 +39,8 @@ export class ReviewOrchestrator {
     enableCodeSuggestions: boolean = true,
     enableSecurityScanning: boolean = true,
     azureOpenAIApiVersion: string = '2024-02-15-preview',
-    useResponsesApi: boolean = false
+    useResponsesApi: boolean = false,
+    mcpServers: MCPServerConfig[] = []
   ) {
     this.httpsAgent = httpsAgent;
     this.azureDevOpsService = new AzureDevOpsService(httpsAgent);
@@ -53,6 +57,7 @@ export class ReviewOrchestrator {
     this.reviewThreshold = reviewThreshold;
     this.enableCodeSuggestions = enableCodeSuggestions;
     this.enableSecurityScanning = enableSecurityScanning;
+    this.mcpService = new MCPService(mcpServers);
   }
 
   public async runFullReview(): Promise<ReviewResult> {
@@ -212,6 +217,29 @@ export class ReviewOrchestrator {
           changed_files: changedFiles
         };
 
+        let externalContext: string[] = [];
+        if (this.mcpService.hasServers()) {
+          externalContext = await this.mcpService.fetchContext({
+            filePath,
+            fileDiff,
+            fileContent: fileContent.content || '',
+            prContext,
+            metadata: {
+              prId: prDetails.id,
+              prTitle: prDetails.title,
+              repository: this.azureDevOpsService.getRepository(),
+              project: this.azureDevOpsService.getProject(),
+              collection: this.azureDevOpsService.getCollection(),
+              pullRequestId: this.azureDevOpsService.getPullRequestIdValue(),
+              sourceBranch: prDetails.sourceRefName,
+              targetBranch: prDetails.targetRefName
+            }
+          });
+          if (externalContext.length > 0) {
+            console.log(`🔗 Received ${externalContext.length} context item(s) from MCP servers for ${filePath}`);
+          }
+        }
+
         // Run the review agent
         const normalizedFilePath = filePath.startsWith('/') ? filePath : '/' + filePath;
         this.fileLineMappings.set(normalizedFilePath, lineMapping);
@@ -230,7 +258,8 @@ export class ReviewOrchestrator {
           fileDiff,
           filePath,
           prContext,
-          lineMapping // pass mapping so agent can fall back to it when diff parsing fails
+          lineMapping, // pass mapping so agent can fall back to it when diff parsing fails
+          externalContext
         );
 
         reviewResults.push(reviewResult);

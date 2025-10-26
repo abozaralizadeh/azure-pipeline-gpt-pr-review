@@ -127,6 +127,47 @@ variables:
 | `support_self_signed_certificate` | boolean | ❌ | false | Support self-signed certificates |
 | `azure_openai_api_version` | string | ❌ | 2024-02-15-preview | Azure OpenAI API version (use newer previews for GPT-4.1 / GPT-5) |
 | `azure_openai_use_responses_api` | boolean | ❌ | false | Call the modern Responses API (required for GPT-4.1 and GPT-5 deployments) |
+| `mcp_servers` | multi-line string | ❌ | - | JSON array describing MCP servers that enrich each review with additional context |
+
+## 🔌 MCP Server Integration
+
+Model Context Protocol (MCP) servers let you plug repository-specific knowledge bases or business rules into the reviewer. Provide them as a JSON array via the `mcp_servers` input (typically using a multi-line string in YAML).
+
+### YAML configuration example
+
+```yaml
+- task: GENAIADVANCEDPRREVIEWER@2
+  inputs:
+    azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
+    azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'
+    azure_openai_deployment_name: 'gpt-4'
+    mcp_servers: |
+      [
+        {
+          "name": "repository-knowledge",
+          "endpoint": "https://example.com/mcp/context",
+          "headers": {
+            "Authorization": "Bearer $(MCP_TOKEN)"
+          },
+          "timeoutMs": 8000,
+          "payloadTemplate": "{\"query\":\"best practices for {{file_path}}\",\"fileDiff\":\"{{file_diff}}\",\"pr\":\"{{pr_context}}\"}"
+        }
+      ]
+```
+
+### Supported fields
+- `name` (required): Friendly identifier used in logs.
+- `endpoint` (required): HTTP URL of the MCP server endpoint.
+- `method`: HTTP method (`POST` by default).
+- `headers`: Additional request headers (e.g., bearer tokens).
+- `timeoutMs`: Request timeout in milliseconds (defaults to 10s).
+- `payloadTemplate`: Optional JSON template string. The agent replaces placeholders like `{{file_path}}`, `{{file_diff}}`, `{{file_content}}`, `{{pr_context}}`, and `{{metadata}}` before sending the request. When omitted, a default payload containing the diff, file content, and PR metadata is used.
+
+### Response expectations
+- Plain strings are treated as context items.
+- JSON arrays should contain strings or objects with a `text` property.
+- JSON objects can return `context`, `contexts`, `content`, or `summary` fields (strings or string arrays).
+- Non-parsable responses are captured as raw text, ensuring the reviewer still receives the additional context.
 
 ## 🔧 How It Works
 

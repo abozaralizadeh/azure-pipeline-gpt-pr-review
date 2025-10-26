@@ -12,7 +12,7 @@
   "demands": [],
   "version": {
     "Major": "2",
-    "Minor": "57",
+    "Minor": "59",
     "Patch": "0"
   },
   "minimumAgentVersion": "1.95.0",
@@ -25,6 +25,14 @@
       "defaultValue": "",
       "required": true,
       "helpMarkDown": "Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com/)"
+    },
+    {
+      "name": "mcp_servers",
+      "type": "multiLine",
+      "label": "MCP Servers Configuration",
+      "defaultValue": "",
+      "required": false,
+      "helpMarkDown": "Optional JSON array describing Model Context Protocol (MCP) servers that should enrich each review. Example: <pre>[{\"name\":\"knowledge-base\",\"endpoint\":\"https://example.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $(MCP_TOKEN)\"}}]</pre>"
     },
     {
       "name": "azure_openai_api_version",

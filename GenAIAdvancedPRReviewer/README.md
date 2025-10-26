@@ -15,6 +15,7 @@ An intelligent, AI-powered Pull Request reviewer for Azure DevOps that uses Azur
 - **Security Scanning**: Detects vulnerabilities like SQL injection, XSS, hardcoded secrets
 - **Style & Standards**: Ensures adherence to coding standards and best practices
 - **Test Coverage**: Analyzes test adequacy and suggests improvements
+- **Precise Diff Tracking**: Comments are anchored to the exact modified lines with automatic range selection, even when Azure DevOps omits diff hunks
 
 ### 🛠️ Azure DevOps Integration
 - **Inline Comments**: Posts specific feedback directly on code lines
@@ -52,17 +53,35 @@ PR Context → Context Analysis → File Review → Security Scan → Code Sugge
 1. **Azure OpenAI Resource**: Create an Azure OpenAI resource in your Azure subscription
 2. **Model Deployment**: Deploy a GPT-4 or GPT-3.5-turbo model
 3. **API Access**: Ensure your Azure DevOps pipeline has access to the Azure OpenAI endpoint
+4. **Preview Models**: For GPT‑4.1/GPT‑5 deployments, use the latest preview API version (e.g., `2024-08-01-preview`) and enable the Responses API input.
 
 ### Azure DevOps Configuration
 1. **Build Service Permissions**: The build service needs permissions to:
    - Read repository content
    - Create and manage PR comments
    - Access PR details and changes
+   - Contribute to pull requests (Project Settings → Repos → Repositories → Security → select *\<ProjectName> Build Service* → grant **Contribute to pull requests**)
 
 2. **Pipeline Variables**: Configure the following variables:
    - `azure_openai_endpoint`: Your Azure OpenAI endpoint URL
    - `azure_openai_api_key`: Your Azure OpenAI API key
    - `azure_openai_deployment_name`: Your model deployment name
+
+3. **Expose the OAuth Token to the Job**  
+   The extension posts inline comments via the pipeline’s OAuth token. Make sure scripts can access it:
+
+   - **YAML pipelines**
+     ```yaml
+     steps:
+     - checkout: self
+       persistCredentials: true
+     ```
+   - **Classic editor** – enable **Allow scripts to access the OAuth token** in the Agent job properties.
+
+4. **Endpoint Format Reminder**  
+   Azure endpoints follow  
+   `https://{resource}.openai.azure.com/openai/deployments/{deployment}/responses?api-version={version}`.  
+   Older GPT‑3.5/4 deployments that still require `/chat/completions` should keep using the legacy endpoint.
 
 ## 🚀 Installation
 
@@ -106,6 +125,49 @@ variables:
 | `enable_code_suggestions` | boolean | ❌ | true | Enable AI code suggestions |
 | `enable_security_scanning` | boolean | ❌ | true | Enable security vulnerability scanning |
 | `support_self_signed_certificate` | boolean | ❌ | false | Support self-signed certificates |
+| `azure_openai_api_version` | string | ❌ | 2024-02-15-preview | Azure OpenAI API version (use newer previews for GPT-4.1 / GPT-5) |
+| `azure_openai_use_responses_api` | boolean | ❌ | false | Call the modern Responses API (required for GPT-4.1 and GPT-5 deployments) |
+| `mcp_servers` | multi-line string | ❌ | - | JSON array describing MCP servers that enrich each review with additional context |
+
+## 🔌 MCP Server Integration
+
+Model Context Protocol (MCP) servers let you plug repository-specific knowledge bases or business rules into the reviewer. Provide them as a JSON array via the `mcp_servers` input (typically using a multi-line string in YAML).
+
+### YAML configuration example
+
+```yaml
+- task: GENAIADVANCEDPRREVIEWER@2
+  inputs:
+    azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
+    azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'
+    azure_openai_deployment_name: 'gpt-4'
+    mcp_servers: |
+      [
+        {
+          "name": "repository-knowledge",
+          "endpoint": "https://example.com/mcp/context",
+          "headers": {
+            "Authorization": "Bearer $(MCP_TOKEN)"
+          },
+          "timeoutMs": 8000,
+          "payloadTemplate": "{\"query\":\"best practices for {{file_path}}\",\"fileDiff\":\"{{file_diff}}\",\"pr\":\"{{pr_context}}\"}"
+        }
+      ]
+```
+
+### Supported fields
+- `name` (required): Friendly identifier used in logs.
+- `endpoint` (required): HTTP URL of the MCP server endpoint.
+- `method`: HTTP method (`POST` by default).
+- `headers`: Additional request headers (e.g., bearer tokens).
+- `timeoutMs`: Request timeout in milliseconds (defaults to 10s).
+- `payloadTemplate`: Optional JSON template string. The agent replaces placeholders like `{{file_path}}`, `{{file_diff}}`, `{{file_content}}`, `{{pr_context}}`, and `{{metadata}}` before sending the request. When omitted, a default payload containing the diff, file content, and PR metadata is used.
+
+### Response expectations
+- Plain strings are treated as context items.
+- JSON arrays should contain strings or objects with a `text` property.
+- JSON objects can return `context`, `contexts`, `content`, or `summary` fields (strings or string arrays).
+- Non-parsable responses are captured as raw text, ensuring the reviewer still receives the additional context.
 
 ## 🔧 How It Works
 
@@ -174,6 +236,7 @@ The extension posts a comprehensive summary comment including:
 2. **Threshold Tuning**: Adjust `review_threshold` based on team preferences
 3. **Security Scanning**: Enable security scanning for production code
 4. **Monitoring**: Monitor LLM usage and costs
+5. **OAuth Token Access**: Confirm `persistCredentials: true` (or the classic “Allow scripts to access the OAuth token” toggle) so the reviewer can post PR comments.
 
 ### For Teams
 1. **Review Culture**: Use the extension as a learning tool, not just a gate
@@ -198,6 +261,16 @@ The extension posts a comprehensive summary comment including:
 #### High LLM Usage
 - Reduce `max_llm_calls` if hitting limits
 - Adjust `review_threshold` to filter out low-confidence suggestions
+
+#### Comments Not Highlighting Diff Lines
+- Ensure the PR branch contains actual line modifications (not whitespace-only changes)
+- Check pipeline logs for `🔧 Built fallback unified diff` messages—these confirm the reviewer successfully reconstructed diff hunks
+- Verify the Azure DevOps build service has permission to call the PR diff APIs (`pullRequests/{id}/changes`, `diffs/commits`)
+
+#### Azure OpenAI 400 Bad Request
+- GPT-4.1/GPT-5 deployments require newer API versions (e.g., `2024-08-01-preview`) — set the `azure_openai_api_version` input accordingly
+- Enable the `azure_openai_use_responses_api` flag for models that only support the Responses API
+- Review the task logs for the exact error body — it will be surfaced when the request fails
 - Consider disabling code suggestions for large PRs
 
 #### Performance Issues
@@ -211,6 +284,9 @@ The extension provides detailed logging:
 - File processing progress
 - LLM call tracking
 - Error details and stack traces
+
+### Verbose logging
+You can enable verbose debug logs (shows LLM prompts and response previews) by setting the environment variable `ADVPR_VERBOSE=1`. The task manifest sets this by default for the packaged task, but you can override it in your pipeline or agent environment if you prefer quieter logs.
 
 ## 📈 Performance & Cost
 

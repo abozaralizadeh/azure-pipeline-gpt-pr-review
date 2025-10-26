@@ -1,6 +1,7 @@
 import * as tl from "azure-pipelines-task-lib/task";
 import { ReviewOrchestrator } from './services/review-orchestrator';
 import https from 'https';
+import { MCPServerConfig } from './types/mcp';
 
 async function run() {
   try {
@@ -23,6 +24,22 @@ async function run() {
     const supportSelfSignedCertificate = tl.getBoolInput('support_self_signed_certificate');
     const azureOpenAIApiVersion = tl.getInput('azure_openai_api_version') || '2024-02-15-preview';
     const useResponsesApi = tl.getBoolInput('azure_openai_use_responses_api');
+    const mcpServersRaw = tl.getInput('mcp_servers');
+
+    let mcpServers: MCPServerConfig[] = [];
+    if (mcpServersRaw) {
+      try {
+        const parsed = JSON.parse(mcpServersRaw);
+        if (!Array.isArray(parsed)) {
+          throw new Error('Configuration must be a JSON array');
+        }
+        mcpServers = parsed as MCPServerConfig[];
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        tl.setResult(tl.TaskResult.Failed, `Invalid MCP servers configuration: ${message}`);
+        return;
+      }
+    }
 
     // Validate required inputs
     if (!azureOpenAIEndpoint) {
@@ -65,6 +82,7 @@ async function run() {
     console.log(`  - Security Scanning: ${enableSecurityScanning ? 'Enabled' : 'Disabled'}`);
     console.log(`  - OpenAI API Version: ${azureOpenAIApiVersion}`);
     console.log(`  - Use Responses API: ${useResponsesApi ? 'Yes' : 'No'}`);
+    console.log(`  - MCP Servers: ${mcpServers.length}`);
     console.log(`  - Self-signed Certificates: ${supportSelfSignedCertificate ? 'Supported' : 'Not Supported'}`);
 
     // Create and run the review orchestrator
@@ -78,7 +96,8 @@ async function run() {
       enableCodeSuggestions,
       enableSecurityScanning,
       azureOpenAIApiVersion,
-      useResponsesApi
+      useResponsesApi,
+      mcpServers
     );
 
     console.log("🔍 Starting comprehensive PR review...");

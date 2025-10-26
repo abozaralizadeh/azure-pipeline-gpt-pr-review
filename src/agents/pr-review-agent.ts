@@ -37,7 +37,8 @@ export const PRReviewState = z.object({
     key_issues: z.string(),
     recommendations: z.string(),
     confidence: z.number()
-  }).optional()
+  }).optional(),
+  external_context: z.array(z.string()).default([])
 });
 
 export type PRReviewStateType = z.infer<typeof PRReviewState>;
@@ -100,7 +101,8 @@ export class AdvancedPRReviewAgent {
     fileDiff: string,
     fileName: string,
     prContext: any,
-    lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext?: boolean }>
+    lineMapping?: Map<number, { originalLine: number; modifiedLine: number; isAdded: boolean; isRemoved: boolean; isContext?: boolean }>,
+    externalContext: string[] = []
   ): Promise<PRReviewStateType> {
     const initialState: PRReviewStateType = {
       messages: [],
@@ -113,13 +115,14 @@ export class AdvancedPRReviewAgent {
       review_threshold: this.reviewThreshold,
       enable_code_suggestions: true,
       enable_security_scanning: true,
-      pr_context: prContext
+      pr_context: prContext,
+      external_context: externalContext || []
     };
 
     try {
       // Run the review process sequentially
-  let state = await this.analyzeContext(initialState);
-  state = await this.reviewFile(state, lineMapping);
+      let state = await this.analyzeContext(initialState);
+      state = await this.reviewFile(state, lineMapping);
       state = await this.securityScan(state);
       state = await this.generateSuggestions(state);
       state = await this.finalizeReview(state);
@@ -415,11 +418,20 @@ export class AdvancedPRReviewAgent {
       return state;
     }
 
+    const contextExternalContext = this.buildExternalContextSection(
+      state.external_context,
+      {
+        heading: 'Additional Context From MCP Servers',
+        instruction: 'Consider this context when assessing review priority.'
+      }
+    );
+
     const contextPrompt = `You are an expert code reviewer. Analyze the following PR context and determine if a detailed review is needed.
 
 PR Title: ${state.pr_context?.title || 'N/A'}
 PR Description: ${state.pr_context?.description || 'N/A'}
 Changed Files: ${state.pr_context?.changed_files?.join(', ') || 'N/A'}
+${contextExternalContext}
 
 Determine if this PR requires a detailed code review based on:
 1. Complexity of changes
@@ -544,12 +556,14 @@ Respond with JSON:
       return state;
     }
 
+    const externalContextSection = this.buildExternalContextSection(state.external_context);
+
     const reviewPrompt = `You are an expert code reviewer. Analyze ONLY the following changed lines from a Pull Request.
 
 File: ${state.current_file}
 
 CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " are nearby context for reference):
-${changedLinesContext}
+${changedLinesContext}${externalContextSection}
 
 IMPORTANT: Only comment on lines prefixed with "+". Context lines are for understanding only.
 
@@ -1307,12 +1321,14 @@ CRITICAL REQUIREMENTS:
       return state;
     }
 
+    const securityExternalContext = this.buildExternalContextSection(state.external_context);
+
     const securityPrompt = `Perform a security analysis of the modified code lines below.
 
 File: ${state.current_file}
 
 CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " provide nearby context):
-${changedLinesContext}
+${changedLinesContext}${securityExternalContext}
 
 IMPORTANT: ONLY analyze lines prefixed with "+". Context lines are for reference and must not be flagged unless they are also changed.
 
@@ -1544,6 +1560,46 @@ Provide a final recommendation in JSON format:
       console.error("Error finalizing review:", error);
       return state;
     }
+  }
+
+  private buildExternalContextSection(
+    contextItems?: string[],
+    options?: {
+      heading?: string;
+      maxItems?: number;
+      instruction?: string;
+      includeInstruction?: boolean;
+    }
+  ): string {
+    if (!contextItems || contextItems.length === 0) {
+      return '';
+    }
+
+    const maxItems = Math.max(1, options?.maxItems ?? 5);
+    const heading = options?.heading ?? 'ADDITIONAL CONTEXT FROM MCP SERVERS';
+    const instruction = options?.instruction ?? 'Incorporate relevant details from this context when reviewing the changes.';
+    const includeInstruction = options?.includeInstruction ?? true;
+
+    const limitedItems = contextItems
+      .slice(0, maxItems)
+      .map(item => item?.trim())
+      .filter((item): item is string => Boolean(item));
+
+    if (limitedItems.length === 0) {
+      return '';
+    }
+
+    const formattedItems = limitedItems
+      .map((item, index) => `CONTEXT ${index + 1}:\n${item}`)
+      .join('\n\n');
+
+    const omittedCount = contextItems.length - limitedItems.length;
+    const omissionNotice = omittedCount > 0
+      ? `\n\nNote: ${omittedCount} additional context item(s) were omitted for brevity.`
+      : '';
+
+    const instructionText = includeInstruction ? `\n${instruction}` : '';
+    return `\n${heading}:\n${formattedItems}${omissionNotice}${instructionText}\n`;
   }
 
   public getLLMCallCount(): number {
