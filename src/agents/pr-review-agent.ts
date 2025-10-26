@@ -151,9 +151,10 @@ export class AdvancedPRReviewAgent {
 
       type ChatPayload = {
         messages: Array<{ role: string; content: string }>;
-        max_tokens: number;
         temperature: number;
         response_format: { type: string };
+        max_tokens?: number;
+        max_completion_tokens?: number;
       };
 
       const payload: ResponsesPayload | ChatPayload = this.useResponsesApi
@@ -182,21 +183,30 @@ export class AdvancedPRReviewAgent {
             temperature: 0.1,
             max_output_tokens: 4000
           }
-        : {
-            messages: [
-              {
-                role: "system",
-                content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
-              },
-              {
-                role: "user",
-                content: prompt
-              }
-            ],
-            max_tokens: 4000,
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-          };
+        : (() => {
+            const chatPayload: ChatPayload = {
+              messages: [
+                {
+                  role: "system",
+                  content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+                },
+                {
+                  role: "user",
+                  content: prompt
+                }
+              ],
+              temperature: 0.1,
+              response_format: { type: "json_object" }
+            };
+
+            if (this.shouldUseMaxCompletionTokens()) {
+              chatPayload.max_completion_tokens = 4000;
+            } else {
+              chatPayload.max_tokens = 4000;
+            }
+
+            return chatPayload;
+          })();
 
       // Safe debug logging (do not print secrets)
       try {
@@ -276,6 +286,30 @@ export class AdvancedPRReviewAgent {
       console.error("Error calling Azure OpenAI:", error);
       throw error;
     }
+  }
+
+  private shouldUseMaxCompletionTokens(): boolean {
+    if (this.useResponsesApi) {
+      return false;
+    }
+
+    const match = this.apiVersion.match(/(\d{4})-(\d{2})/);
+    if (!match) {
+      return false;
+    }
+
+    const year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+
+    if (Number.isNaN(year) || Number.isNaN(month)) {
+      return false;
+    }
+
+    if (year > 2024) {
+      return true;
+    }
+
+    return year === 2024 && month >= 7;
   }
 
   private safeJsonParse(jsonString: string, fallback: any): any {

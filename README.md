@@ -53,17 +53,35 @@ PR Context → Context Analysis → File Review → Security Scan → Code Sugge
 1. **Azure OpenAI Resource**: Create an Azure OpenAI resource in your Azure subscription
 2. **Model Deployment**: Deploy a GPT-4 or GPT-3.5-turbo model
 3. **API Access**: Ensure your Azure DevOps pipeline has access to the Azure OpenAI endpoint
+4. **Preview Models**: For GPT‑4.1/GPT‑5 deployments, use the latest preview API version (e.g., `2024-08-01-preview`) and enable the Responses API input.
 
 ### Azure DevOps Configuration
 1. **Build Service Permissions**: The build service needs permissions to:
    - Read repository content
    - Create and manage PR comments
    - Access PR details and changes
+   - Contribute to pull requests (Project Settings → Repos → Repositories → Security → select *\<ProjectName> Build Service* → grant **Contribute to pull requests**)
 
 2. **Pipeline Variables**: Configure the following variables:
    - `azure_openai_endpoint`: Your Azure OpenAI endpoint URL
    - `azure_openai_api_key`: Your Azure OpenAI API key
    - `azure_openai_deployment_name`: Your model deployment name
+
+3. **Expose the OAuth Token to the Job**  
+   The extension posts inline comments via the pipeline’s OAuth token. Make sure scripts can access it:
+
+   - **YAML pipelines**
+     ```yaml
+     steps:
+     - checkout: self
+       persistCredentials: true
+     ```
+   - **Classic editor** – enable **Allow scripts to access the OAuth token** in the Agent job properties.
+
+4. **Endpoint Format Reminder**  
+   Azure endpoints follow  
+   `https://{resource}.openai.azure.com/openai/deployments/{deployment}/responses?api-version={version}`.  
+   Older GPT‑3.5/4 deployments that still require `/chat/completions` should keep using the legacy endpoint.
 
 ## 🚀 Installation
 
@@ -177,6 +195,7 @@ The extension posts a comprehensive summary comment including:
 2. **Threshold Tuning**: Adjust `review_threshold` based on team preferences
 3. **Security Scanning**: Enable security scanning for production code
 4. **Monitoring**: Monitor LLM usage and costs
+5. **OAuth Token Access**: Confirm `persistCredentials: true` (or the classic “Allow scripts to access the OAuth token” toggle) so the reviewer can post PR comments.
 
 ### For Teams
 1. **Review Culture**: Use the extension as a learning tool, not just a gate
