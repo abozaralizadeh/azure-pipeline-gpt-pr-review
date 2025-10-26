@@ -449,13 +449,21 @@ export class ReviewOrchestrator {
     });
   }
 
-  private isDuplicateComment(newComment: any, existingComments: any[], existingIndex: Map<string, string[]>): boolean {
+  private isDuplicateComment(
+    newComment: any,
+    existingComments: any[],
+    existingIndex: { byLocation: Map<string, string[]>; byContent: Set<string> }
+  ): boolean {
     // Only consider inline comments for duplicate detection
     if (!newComment.file || typeof newComment.line !== 'number' || newComment.line <= 0) return false;
 
     const normalizedNewFile = newComment.file.startsWith('/') ? newComment.file : '/' + newComment.file;
     const normalizedKey = `${normalizedNewFile}|${newComment.line}`;
     const normalizedNewContent = this.normalizeCommentContent(this.formatInlineComment(newComment));
+
+    if (existingIndex.byContent.has(normalizedNewContent)) {
+      return true;
+    }
 
     return existingComments.some(existingComment => {
       if (!existingComment.content) return false;
@@ -492,7 +500,7 @@ export class ReviewOrchestrator {
         return false;
       }
 
-      const existingSet = existingIndex.get(normalizedKey);
+      const existingSet = existingIndex.byLocation.get(normalizedKey);
       if (!existingSet || existingSet.length === 0) {
         return false;
       }
@@ -556,8 +564,9 @@ export class ReviewOrchestrator {
     return formattedComment;
   }
 
-  private buildExistingCommentIndex(existingComments: any[]): Map<string, string[]> {
-    const index = new Map<string, string[]>();
+  private buildExistingCommentIndex(existingComments: any[]): { byLocation: Map<string, string[]>; byContent: Set<string> } {
+    const byLocation = new Map<string, string[]>();
+    const byContent = new Set<string>();
 
     existingComments.forEach(existingComment => {
       const filePath = existingComment.threadContext?.filePath;
@@ -579,14 +588,15 @@ export class ReviewOrchestrator {
         return;
       }
 
-      if (!index.has(key)) {
-        index.set(key, []);
+      if (!byLocation.has(key)) {
+        byLocation.set(key, []);
       }
 
-      index.get(key)!.push(normalizedContent);
+      byLocation.get(key)!.push(normalizedContent);
+      byContent.add(normalizedContent);
     });
 
-    return index;
+    return { byLocation, byContent };
   }
 
   private normalizeCommentContent(content: string): string {

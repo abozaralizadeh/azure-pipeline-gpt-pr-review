@@ -157,6 +157,8 @@ export class AdvancedPRReviewAgent {
         max_completion_tokens?: number;
       };
 
+      const temperature = this.shouldForceDefaultTemperature() ? 1 : 0.1;
+
       const payload: ResponsesPayload | ChatPayload = this.useResponsesApi
         ? {
             input: [
@@ -180,7 +182,7 @@ export class AdvancedPRReviewAgent {
               }
             ],
             response_format: { type: "json_object" },
-            temperature: 0.1,
+            temperature,
             max_output_tokens: 4000
           }
         : (() => {
@@ -195,7 +197,7 @@ export class AdvancedPRReviewAgent {
                   content: prompt
                 }
               ],
-              temperature: 0.1,
+              temperature,
               response_format: { type: "json_object" }
             };
 
@@ -291,6 +293,30 @@ export class AdvancedPRReviewAgent {
   private shouldUseMaxCompletionTokens(): boolean {
     if (this.useResponsesApi) {
       return false;
+    }
+
+    const match = this.apiVersion.match(/(\d{4})-(\d{2})/);
+    if (!match) {
+      return false;
+    }
+
+    const year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+
+    if (Number.isNaN(year) || Number.isNaN(month)) {
+      return false;
+    }
+
+    if (year > 2024) {
+      return true;
+    }
+
+    return year === 2024 && month >= 7;
+  }
+
+  private shouldForceDefaultTemperature(): boolean {
+    if (this.useResponsesApi) {
+      return true;
     }
 
     const match = this.apiVersion.match(/(\d{4})-(\d{2})/);
