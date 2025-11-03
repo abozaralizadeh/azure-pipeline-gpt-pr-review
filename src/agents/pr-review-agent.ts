@@ -139,162 +139,208 @@ export class AdvancedPRReviewAgent {
       throw new Error("Maximum LLM calls reached");
     }
 
+    const preferResponsesApi = this.useResponsesApi;
+
     try {
-      const baseUrl = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}`;
-      const url = this.useResponsesApi
-        ? `${baseUrl}/responses?api-version=${this.apiVersion}`
-        : `${baseUrl}/chat/completions?api-version=${this.apiVersion}`;
-
-      type ResponsesPayload = {
-        input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
-        response_format: { type: string };
-        temperature: number;
-        max_output_tokens: number;
-      };
-
-      type ChatPayload = {
-        messages: Array<{ role: string; content: string }>;
-        temperature: number;
-        response_format: { type: string };
-        max_tokens?: number;
-        max_completion_tokens?: number;
-      };
-
-      const temperature = this.shouldForceDefaultTemperature() ? 1 : 0.1;
-
-      const payload: ResponsesPayload | ChatPayload = this.useResponsesApi
-        ? {
-            input: [
-              {
-                role: "system",
-                content: [
-                  {
-                    type: "text",
-                    text: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
-                  }
-                ]
-              },
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: prompt
-                  }
-                ]
-              }
-            ],
-            response_format: { type: "json_object" },
-            temperature,
-            max_output_tokens: 4000
-          }
-        : (() => {
-            const chatPayload: ChatPayload = {
-              messages: [
-                {
-                  role: "system",
-                  content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
-                },
-                {
-                  role: "user",
-                  content: prompt
-                }
-              ],
-              temperature,
-              response_format: { type: "json_object" }
-            };
-
-            if (this.shouldUseMaxCompletionTokens()) {
-              chatPayload.max_completion_tokens = 4000;
-            } else {
-              chatPayload.max_tokens = 4000;
-            }
-
-            return chatPayload;
-          })();
-
-      // Safe debug logging (do not print secrets)
-      try {
-        if (this.verbose) {
-          const userMsg = 'input' in payload
-            ? (payload.input.find((m) => m.role === 'user')?.content?.[0]?.text || '')
-            : (payload.messages.find((m) => m.role === 'user')?.content || '');
-          console.log('🔎 OpenAI request summary:');
-          console.log(`  - URL: ${url}`);
-          console.log(`  - Deployment: ${this.deploymentName}`);
-          const messageCount = 'input' in payload ? payload.input.length : payload.messages.length;
-          console.log(`  - Messages: ${messageCount}`);
-          console.log(`  - Prompt length: ${userMsg.length} chars`);
-          console.log(`  - Prompt preview (first 600 chars):\n${userMsg.substring(0, 600)}`);
-          if (userMsg.length > 600) console.log(`  - Prompt tail preview (last 200 chars):\n${userMsg.substring(userMsg.length - 200)}`);
-        }
-      } catch (logErr) {
-        console.log('⚠️ Failed to log OpenAI request summary', logErr);
-      }
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'api-key': this.azureOpenAIKey
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        let errorBody = '';
-        try {
-          errorBody = await response.text();
-        } catch (readErr) {
-          errorBody = `<failed to read error body: ${readErr}>`;
-        }
-        throw new Error(`Azure OpenAI API error: ${response.status} ${response.statusText} - ${errorBody}`);
-      }
-
-      const data = await response.json() as any;
-      this.llmCalls++;
-      let content = '';
-
-      if (this.useResponsesApi) {
-        content =
-          data.output_text ||
-          (Array.isArray(data.output)
-            ? (data.output
-                .flatMap((item: any) => item.content || [])
-                .find((part: any) => part.type === 'text')?.text || '')
-            : '');
-      } else {
-        content = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
-      }
-
-      try {
-        if (this.verbose) {
-          console.log('🔍 OpenAI response summary:');
-          console.log(`  - HTTP status: ${response.status}`);
-          if (this.useResponsesApi) {
-            const outputCount = Array.isArray(data.output) ? data.output.length : 0;
-            console.log(`  - Output items: ${outputCount}`);
-          } else {
-            const choicesCount = Array.isArray(data.choices) ? data.choices.length : 0;
-            console.log(`  - Choices: ${choicesCount}`);
-          }
-          console.log(`  - Response length: ${content ? content.length : 0} chars`);
-          if (content) console.log(`  - Response preview (first 600 chars):\n${content.substring(0, 600)}`);
-          if (content && content.length > 600) console.log(`  - Response tail preview (last 200 chars):\n${content.substring(content.length - 200)}`);
-        }
-      } catch (logErr) {
-        console.log('⚠️ Failed to log OpenAI response summary', logErr);
-      }
-
-      return content;
+      return await this.performAzureOpenAIRequest(prompt, preferResponsesApi, 'primary');
     } catch (error) {
+      if (preferResponsesApi && this.shouldFallbackToChatCompletions(error)) {
+        const status = (error as { status?: number })?.status;
+        const message = (error as Error)?.message || '';
+        console.warn(`⚠️ Responses API call failed${status ? ` (${status})` : ''}. Falling back to the legacy chat/completions endpoint.`);
+        if (this.verbose && message) {
+          console.warn(`   ↳ Original error: ${message}`);
+        }
+        this.useResponsesApi = false;
+        return await this.performAzureOpenAIRequest(prompt, false, 'fallback');
+      }
+
       console.error("Error calling Azure OpenAI:", error);
       throw error;
     }
   }
 
-  private shouldUseMaxCompletionTokens(): boolean {
-    if (this.useResponsesApi) {
+  private async performAzureOpenAIRequest(
+    prompt: string,
+    useResponsesEndpoint: boolean,
+    attempt: 'primary' | 'fallback'
+  ): Promise<string> {
+    const baseUrl = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}`;
+    const url = useResponsesEndpoint
+      ? `${baseUrl}/responses?api-version=${this.apiVersion}`
+      : `${baseUrl}/chat/completions?api-version=${this.apiVersion}`;
+
+    type ResponsesPayload = {
+      input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
+      response_format: { type: string };
+      temperature: number;
+      max_output_tokens: number;
+    };
+
+    type ChatPayload = {
+      messages: Array<{ role: string; content: string }>;
+      temperature: number;
+      response_format: { type: string };
+      max_tokens?: number;
+      max_completion_tokens?: number;
+    };
+
+    const temperature = this.shouldForceDefaultTemperature(useResponsesEndpoint) ? 1 : 0.1;
+
+    const payload: ResponsesPayload | ChatPayload = useResponsesEndpoint
+      ? {
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "text",
+                  text: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: prompt
+                }
+              ]
+            }
+          ],
+          response_format: { type: "json_object" },
+          temperature,
+          max_output_tokens: 4000
+        }
+      : (() => {
+          const chatPayload: ChatPayload = {
+            messages: [
+              {
+                role: "system",
+                content: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+              },
+              {
+                role: "user",
+                content: prompt
+              }
+            ],
+            temperature,
+            response_format: { type: "json_object" }
+          };
+
+          if (this.shouldUseMaxCompletionTokens(useResponsesEndpoint)) {
+            chatPayload.max_completion_tokens = 4000;
+          } else {
+            chatPayload.max_tokens = 4000;
+          }
+
+          return chatPayload;
+        })();
+
+    // Safe debug logging (do not print secrets)
+    try {
+      if (this.verbose) {
+        const userMsg = 'input' in payload
+          ? (payload.input.find((m) => m.role === 'user')?.content?.[0]?.text || '')
+          : (payload.messages.find((m) => m.role === 'user')?.content || '');
+        console.log('🔎 OpenAI request summary:');
+        console.log(`  - URL: ${url}`);
+        console.log(`  - Deployment: ${this.deploymentName}`);
+        console.log(`  - Endpoint Mode: ${useResponsesEndpoint ? 'responses' : 'chat/completions'}${attempt === 'fallback' ? ' (fallback)' : ''}`);
+        const messageCount = 'input' in payload ? payload.input.length : payload.messages.length;
+        console.log(`  - Messages: ${messageCount}`);
+        console.log(`  - Prompt length: ${userMsg.length} chars`);
+        console.log(`  - Prompt preview (first 600 chars):\n${userMsg.substring(0, 600)}`);
+        if (userMsg.length > 600) console.log(`  - Prompt tail preview (last 200 chars):\n${userMsg.substring(userMsg.length - 200)}`);
+      }
+    } catch (logErr) {
+      console.log('⚠️ Failed to log OpenAI request summary', logErr);
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': this.azureOpenAIKey
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      let errorBody = '';
+      try {
+        errorBody = await response.text();
+      } catch (readErr) {
+        errorBody = `<failed to read error body: ${readErr}>`;
+      }
+      const enrichedError = new Error(`Azure OpenAI API error: ${response.status} ${response.statusText} - ${errorBody}`) as Error & {
+        status?: number;
+        body?: string;
+        useResponses?: boolean;
+      };
+      enrichedError.status = response.status;
+      enrichedError.body = errorBody;
+      enrichedError.useResponses = useResponsesEndpoint;
+      throw enrichedError;
+    }
+
+    const data = await response.json() as any;
+    this.llmCalls++;
+    let content = '';
+
+    if (useResponsesEndpoint) {
+      content =
+        data.output_text ||
+        (Array.isArray(data.output)
+          ? (data.output
+              .flatMap((item: any) => item.content || [])
+              .find((part: any) => part.type === 'text')?.text || '')
+          : '');
+    } else {
+      content = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
+    }
+
+    try {
+      if (this.verbose) {
+        console.log('🔍 OpenAI response summary:');
+        console.log(`  - HTTP status: ${response.status}`);
+        console.log(`  - Endpoint Mode: ${useResponsesEndpoint ? 'responses' : 'chat/completions'}`);
+        if (useResponsesEndpoint) {
+          const outputCount = Array.isArray(data.output) ? data.output.length : 0;
+          console.log(`  - Output items: ${outputCount}`);
+        } else {
+          const choicesCount = Array.isArray(data.choices) ? data.choices.length : 0;
+          console.log(`  - Choices: ${choicesCount}`);
+        }
+        console.log(`  - Response length: ${content ? content.length : 0} chars`);
+        if (content) console.log(`  - Response preview (first 600 chars):\n${content.substring(0, 600)}`);
+        if (content && content.length > 600) console.log(`  - Response tail preview (last 200 chars):\n${content.substring(content.length - 200)}`);
+      }
+    } catch (logErr) {
+      console.log('⚠️ Failed to log OpenAI response summary', logErr);
+    }
+
+    return content;
+  }
+
+  private shouldFallbackToChatCompletions(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const candidate = error as { status?: number; body?: string; message?: string; useResponses?: boolean };
+
+    if (candidate.status !== 404) {
+      return false;
+    }
+
+    const bodyText = candidate.body || candidate.message || '';
+    return /resource not found/i.test(bodyText) || /deployment/i.test(bodyText) || candidate.useResponses === true;
+  }
+
+  private shouldUseMaxCompletionTokens(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
+    if (useResponsesEndpoint) {
       return false;
     }
 
@@ -317,8 +363,8 @@ export class AdvancedPRReviewAgent {
     return year === 2024 && month >= 7;
   }
 
-  private shouldForceDefaultTemperature(): boolean {
-    if (this.useResponsesApi) {
+  private shouldForceDefaultTemperature(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
+    if (useResponsesEndpoint) {
       return true;
     }
 
