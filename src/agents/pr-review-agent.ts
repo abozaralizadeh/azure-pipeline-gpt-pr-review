@@ -141,20 +141,56 @@ export class AdvancedPRReviewAgent {
 
     const preferResponsesApi = this.useResponsesApi;
 
-    try {
-      return await this.performAzureOpenAIRequest(prompt, preferResponsesApi, 'primary');
-    } catch (error) {
-      if (preferResponsesApi && this.shouldFallbackToChatCompletions(error)) {
-        const status = (error as { status?: number })?.status;
-        const message = (error as Error)?.message || '';
-        console.warn(`⚠️ Responses API call failed${status ? ` (${status})` : ''}. Falling back to the legacy chat/completions endpoint.`);
-        if (this.verbose && message) {
-          console.warn(`   ↳ Original error: ${message}`);
-        }
-        this.useResponsesApi = false;
-        return await this.performAzureOpenAIRequest(prompt, false, 'fallback');
-      }
+    if (preferResponsesApi) {
+      try {
+        return await this.performAzureOpenAIRequest(prompt, 'responsesDeployment', 'primary');
+      } catch (error) {
+        if (this.shouldTryGlobalResponsesEndpoint(error)) {
+          const status = (error as { status?: number })?.status;
+          const message = (error as Error)?.message || '';
+          console.warn(`⚠️ Responses deployment endpoint returned 404${status ? ` (${status})` : ''}. Retrying via the global responses path.`);
+          if (this.verbose && message) {
+            console.warn(`   ↳ Original error: ${message}`);
+          }
 
+          try {
+            return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', 'fallback');
+          } catch (globalError) {
+            if (this.shouldFallbackToChatCompletions(globalError)) {
+              this.useResponsesApi = false;
+              const fallbackStatus = (globalError as { status?: number })?.status;
+              const fallbackMessage = (globalError as Error)?.message || '';
+              console.warn(`⚠️ Global responses endpoint unavailable${fallbackStatus ? ` (${fallbackStatus})` : ''}. Falling back to legacy chat/completions.`);
+              if (this.verbose && fallbackMessage) {
+                console.warn(`   ↳ Original error: ${fallbackMessage}`);
+              }
+              return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+            }
+
+            console.error("Error calling Azure OpenAI via global responses endpoint:", globalError);
+            throw globalError;
+          }
+        }
+
+        if (this.shouldFallbackToChatCompletions(error)) {
+          this.useResponsesApi = false;
+          const status = (error as { status?: number })?.status;
+          const message = (error as Error)?.message || '';
+          console.warn(`⚠️ Responses API call failed${status ? ` (${status})` : ''}. Falling back to the legacy chat/completions endpoint.`);
+          if (this.verbose && message) {
+            console.warn(`   ↳ Original error: ${message}`);
+          }
+          return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+        }
+
+        console.error("Error calling Azure OpenAI via responses endpoint:", error);
+        throw error;
+      }
+    }
+
+    try {
+      return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'primary');
+    } catch (error) {
       console.error("Error calling Azure OpenAI:", error);
       throw error;
     }
@@ -162,19 +198,32 @@ export class AdvancedPRReviewAgent {
 
   private async performAzureOpenAIRequest(
     prompt: string,
-    useResponsesEndpoint: boolean,
+    mode: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions',
     attempt: 'primary' | 'fallback'
   ): Promise<string> {
-    const baseUrl = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}`;
-    const url = useResponsesEndpoint
-      ? `${baseUrl}/responses?api-version=${this.apiVersion}`
-      : `${baseUrl}/chat/completions?api-version=${this.apiVersion}`;
+    const isResponsesMode = mode !== 'chatCompletions';
+    const deploymentBaseUrl = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}`;
+
+    let url: string;
+    switch (mode) {
+      case 'responsesDeployment':
+        url = `${deploymentBaseUrl}/responses?api-version=${this.apiVersion}`;
+        break;
+      case 'responsesGlobal':
+        url = `${this.azureOpenAIEndpoint}/openai/v1/responses?api-version=${this.apiVersion}`;
+        break;
+      case 'chatCompletions':
+      default:
+        url = `${deploymentBaseUrl}/chat/completions?api-version=${this.apiVersion}`;
+        break;
+    }
 
     type ResponsesPayload = {
       input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
       response_format: { type: string };
       temperature: number;
       max_output_tokens: number;
+      model?: string;
     };
 
     type ChatPayload = {
@@ -185,34 +234,42 @@ export class AdvancedPRReviewAgent {
       max_completion_tokens?: number;
     };
 
-    const temperature = this.shouldForceDefaultTemperature(useResponsesEndpoint) ? 1 : 0.1;
+    const temperature = this.shouldForceDefaultTemperature(isResponsesMode) ? 1 : 0.1;
 
-    const payload: ResponsesPayload | ChatPayload = useResponsesEndpoint
-      ? {
-          input: [
-            {
-              role: "system",
-              content: [
-                {
-                  type: "text",
-                  text: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
-                }
-              ]
-            },
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: prompt
-                }
-              ]
-            }
-          ],
-          response_format: { type: "json_object" },
-          temperature,
-          max_output_tokens: 4000
-        }
+    const payload: ResponsesPayload | ChatPayload = isResponsesMode
+      ? (() => {
+          const responsesPayload: ResponsesPayload = {
+            input: [
+              {
+                role: "system",
+                content: [
+                  {
+                    type: "text",
+                    text: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
+                  }
+                ]
+              },
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: prompt
+                  }
+                ]
+              }
+            ],
+            response_format: { type: "json_object" },
+            temperature,
+            max_output_tokens: 4000
+          };
+
+          if (mode === 'responsesGlobal') {
+            responsesPayload.model = this.deploymentName;
+          }
+
+          return responsesPayload;
+        })()
       : (() => {
           const chatPayload: ChatPayload = {
             messages: [
@@ -229,7 +286,7 @@ export class AdvancedPRReviewAgent {
             response_format: { type: "json_object" }
           };
 
-          if (this.shouldUseMaxCompletionTokens(useResponsesEndpoint)) {
+          if (this.shouldUseMaxCompletionTokens(isResponsesMode)) {
             chatPayload.max_completion_tokens = 4000;
           } else {
             chatPayload.max_tokens = 4000;
@@ -247,7 +304,7 @@ export class AdvancedPRReviewAgent {
         console.log('🔎 OpenAI request summary:');
         console.log(`  - URL: ${url}`);
         console.log(`  - Deployment: ${this.deploymentName}`);
-        console.log(`  - Endpoint Mode: ${useResponsesEndpoint ? 'responses' : 'chat/completions'}${attempt === 'fallback' ? ' (fallback)' : ''}`);
+        console.log(`  - Endpoint Mode: ${mode}${attempt === 'fallback' ? ' (fallback)' : ''}`);
         const messageCount = 'input' in payload ? payload.input.length : payload.messages.length;
         console.log(`  - Messages: ${messageCount}`);
         console.log(`  - Prompt length: ${userMsg.length} chars`);
@@ -277,11 +334,11 @@ export class AdvancedPRReviewAgent {
       const enrichedError = new Error(`Azure OpenAI API error: ${response.status} ${response.statusText} - ${errorBody}`) as Error & {
         status?: number;
         body?: string;
-        useResponses?: boolean;
+        endpointMode?: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions';
       };
       enrichedError.status = response.status;
       enrichedError.body = errorBody;
-      enrichedError.useResponses = useResponsesEndpoint;
+      enrichedError.endpointMode = mode;
       throw enrichedError;
     }
 
@@ -289,7 +346,7 @@ export class AdvancedPRReviewAgent {
     this.llmCalls++;
     let content = '';
 
-    if (useResponsesEndpoint) {
+    if (isResponsesMode) {
       content =
         data.output_text ||
         (Array.isArray(data.output)
@@ -305,8 +362,8 @@ export class AdvancedPRReviewAgent {
       if (this.verbose) {
         console.log('🔍 OpenAI response summary:');
         console.log(`  - HTTP status: ${response.status}`);
-        console.log(`  - Endpoint Mode: ${useResponsesEndpoint ? 'responses' : 'chat/completions'}`);
-        if (useResponsesEndpoint) {
+        console.log(`  - Endpoint Mode: ${mode}`);
+        if (isResponsesMode) {
           const outputCount = Array.isArray(data.output) ? data.output.length : 0;
           console.log(`  - Output items: ${outputCount}`);
         } else {
@@ -324,19 +381,36 @@ export class AdvancedPRReviewAgent {
     return content;
   }
 
+  private shouldTryGlobalResponsesEndpoint(error: unknown): boolean {
+    if (!this.isNotFoundError(error)) {
+      return false;
+    }
+
+    const mode = (error as { endpointMode?: string }).endpointMode;
+    return mode === 'responsesDeployment';
+  }
+
   private shouldFallbackToChatCompletions(error: unknown): boolean {
+    if (!this.isNotFoundError(error)) {
+      return false;
+    }
+
+    const mode = (error as { endpointMode?: string }).endpointMode;
+    return mode === 'responsesDeployment' || mode === 'responsesGlobal';
+  }
+
+  private isNotFoundError(error: unknown): boolean {
     if (!error || typeof error !== 'object') {
       return false;
     }
 
-    const candidate = error as { status?: number; body?: string; message?: string; useResponses?: boolean };
-
+    const candidate = error as { status?: number; body?: string; message?: string };
     if (candidate.status !== 404) {
       return false;
     }
 
     const bodyText = candidate.body || candidate.message || '';
-    return /resource not found/i.test(bodyText) || /deployment/i.test(bodyText) || candidate.useResponses === true;
+    return /resource not found/i.test(bodyText) || /deployment/i.test(bodyText) || /model/i.test(bodyText);
   }
 
   private shouldUseMaxCompletionTokens(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
