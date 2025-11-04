@@ -382,7 +382,7 @@ export class AdvancedPRReviewAgent {
   }
 
   private shouldTryGlobalResponsesEndpoint(error: unknown): boolean {
-    if (!this.isNotFoundError(error)) {
+    if (!this.isNotFoundError(error) && !this.isUnsupportedApiVersionError(error)) {
       return false;
     }
 
@@ -391,7 +391,7 @@ export class AdvancedPRReviewAgent {
   }
 
   private shouldFallbackToChatCompletions(error: unknown): boolean {
-    if (!this.isNotFoundError(error)) {
+    if (!this.isNotFoundError(error) && !this.isUnsupportedApiVersionError(error)) {
       return false;
     }
 
@@ -411,6 +411,20 @@ export class AdvancedPRReviewAgent {
 
     const bodyText = candidate.body || candidate.message || '';
     return /resource not found/i.test(bodyText) || /deployment/i.test(bodyText) || /model/i.test(bodyText);
+  }
+
+  private isUnsupportedApiVersionError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const candidate = error as { status?: number; body?: string; message?: string };
+    if (candidate.status !== 400) {
+      return false;
+    }
+
+    const bodyText = candidate.body || candidate.message || '';
+    return /api version not supported/i.test(bodyText) || /unsupported api version/i.test(bodyText);
   }
 
   private shouldUseMaxCompletionTokens(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
