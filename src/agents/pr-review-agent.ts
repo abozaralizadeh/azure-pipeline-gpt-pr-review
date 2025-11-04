@@ -158,27 +158,13 @@ export class AdvancedPRReviewAgent {
           } catch (globalError) {
             if (this.shouldFallbackToChatCompletions(globalError)) {
               const fallbackStatus = (globalError as { status?: number })?.status;
-              const fallbackMessage = (globalError as Error)?.message || '';
-              console.warn(`⚠️ Global responses endpoint unavailable${fallbackStatus ? ` (${fallbackStatus})` : ''}. Attempting legacy chat/completions fallback.`);
-              if (this.verbose && fallbackMessage) {
-                console.warn(`   ↳ Original error: ${fallbackMessage}`);
-              }
-
-              try {
-                const chatResult = await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
-                this.useResponsesApi = false;
-                return chatResult;
-              } catch (chatError) {
-                if (this.isOperationNotSupportedForChat(chatError)) {
-                  const message = [
-                    'Chat Completions fallback is not supported for this deployment.',
-                    'Ensure the Azure deployment (gpt-5-codex) is configured for the Responses API and uses a supported api-version.',
-                    'You may need to set the task input `azure_openai_api_version` to a supported preview (e.g., 2024-08-01-preview) or disable the Responses API fallback.'
-                  ].join(' ');
-                  throw new Error(`${message}\nOriginal error: ${chatError instanceof Error ? chatError.message : String(chatError)}`);
-                }
-                throw chatError;
-              }
+              const fallbackMessage = (globalError as { body?: string; message?: string })?.body ?? (globalError as Error)?.message ?? String(globalError);
+              const guidance = [
+                `Responses API request failed${fallbackStatus ? ` (status ${fallbackStatus})` : ''} for deployment "${this.deploymentName}".`,
+                'Verify that the deployment is configured for the Responses API and that the specified `azure_openai_api_version` is supported.',
+                'If the deployment only supports the legacy chat/completions API, disable the "Use Responses API" input in the task configuration.'
+              ].join(' ');
+              throw new Error(`${guidance}\nOriginal error: ${fallbackMessage}`);
             }
 
             console.error("Error calling Azure OpenAI via global responses endpoint:", globalError);
@@ -188,27 +174,13 @@ export class AdvancedPRReviewAgent {
 
         if (this.shouldFallbackToChatCompletions(error)) {
           const status = (error as { status?: number })?.status;
-          const message = (error as Error)?.message || '';
-          console.warn(`⚠️ Responses API call failed${status ? ` (${status})` : ''}. Falling back to the legacy chat/completions endpoint.`);
-          if (this.verbose && message) {
-            console.warn(`   ↳ Original error: ${message}`);
-          }
-
-          try {
-            const chatResult = await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
-            this.useResponsesApi = false;
-            return chatResult;
-          } catch (chatError) {
-            if (this.isOperationNotSupportedForChat(chatError)) {
-              const guidance = [
-                'The deployment does not support chat completions.',
-                'Update the Azure OpenAI API version input to a supported Responses API preview (e.g., 2024-08-01-preview) or disable the Responses API option.',
-                'Verify the deployment is configured for the Responses or Chat Completions API.'
-              ].join(' ');
-              throw new Error(`${guidance}\nOriginal error: ${chatError instanceof Error ? chatError.message : String(chatError)}`);
-            }
-            throw chatError;
-          }
+          const message = (error as { body?: string; message?: string })?.body ?? (error as Error)?.message ?? String(error);
+          const guidance = [
+            `Responses API call failed${status ? ` (status ${status})` : ''} for deployment "${this.deploymentName}".`,
+            'Confirm that the deployment exposes the Responses API endpoint and that the configured `azure_openai_api_version` is valid.',
+            'If the deployment only supports the legacy chat/completions API, disable the "Use Responses API" input in the task configuration.'
+          ].join(' ');
+          throw new Error(`${guidance}\nOriginal error: ${message}`);
         }
 
         console.error("Error calling Azure OpenAI via responses endpoint:", error);
@@ -254,7 +226,7 @@ export class AdvancedPRReviewAgent {
 
     type ResponsesPayload = {
       input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
-      response_format: { type: string };
+      text: { format: { type: string } };
       temperature: number;
       max_output_tokens: number;
       model?: string;
@@ -293,14 +265,12 @@ export class AdvancedPRReviewAgent {
                 ]
               }
             ],
-            response_format: { type: "json_object" },
+            text: { format: { type: "text" } },
             temperature,
             max_output_tokens: 4000
           };
 
-          if (mode === 'responsesGlobal') {
-            responsesPayload.model = this.deploymentName;
-          }
+          responsesPayload.model = this.deploymentName;
 
           return responsesPayload;
         })()
@@ -467,20 +437,6 @@ export class AdvancedPRReviewAgent {
 
     const bodyText = candidate.body || candidate.message || '';
     return /api version not supported/i.test(bodyText) || /unsupported api version/i.test(bodyText);
-  }
-
-  private isOperationNotSupportedForChat(error: unknown): boolean {
-    if (!error || typeof error !== 'object') {
-      return false;
-    }
-
-    const candidate = error as { status?: number; body?: string; message?: string; endpointMode?: string };
-    if (candidate.endpointMode !== 'chatCompletions') {
-      return false;
-    }
-
-    const bodyText = candidate.body || candidate.message || '';
-    return /operationnotsupported/i.test(bodyText) || /does not work with the specified model/i.test(bodyText);
   }
 
   private shouldUseMaxCompletionTokens(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
