@@ -154,17 +154,31 @@ export class AdvancedPRReviewAgent {
           }
 
           try {
-            return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', 'fallback');
+            return await this.tryGlobalResponsesEndpoints(prompt);
           } catch (globalError) {
             if (this.shouldFallbackToChatCompletions(globalError)) {
-              this.useResponsesApi = false;
               const fallbackStatus = (globalError as { status?: number })?.status;
               const fallbackMessage = (globalError as Error)?.message || '';
-              console.warn(`⚠️ Global responses endpoint unavailable${fallbackStatus ? ` (${fallbackStatus})` : ''}. Falling back to legacy chat/completions.`);
+              console.warn(`⚠️ Global responses endpoint unavailable${fallbackStatus ? ` (${fallbackStatus})` : ''}. Attempting legacy chat/completions fallback.`);
               if (this.verbose && fallbackMessage) {
                 console.warn(`   ↳ Original error: ${fallbackMessage}`);
               }
-              return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+
+              try {
+                const chatResult = await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+                this.useResponsesApi = false;
+                return chatResult;
+              } catch (chatError) {
+                if (this.isOperationNotSupportedForChat(chatError)) {
+                  const message = [
+                    'Chat Completions fallback is not supported for this deployment.',
+                    'Ensure the Azure deployment (gpt-5-codex) is configured for the Responses API and uses a supported api-version.',
+                    'You may need to set the task input `azure_openai_api_version` to a supported preview (e.g., 2024-08-01-preview) or disable the Responses API fallback.'
+                  ].join(' ');
+                  throw new Error(`${message}\nOriginal error: ${chatError instanceof Error ? chatError.message : String(chatError)}`);
+                }
+                throw chatError;
+              }
             }
 
             console.error("Error calling Azure OpenAI via global responses endpoint:", globalError);
@@ -173,14 +187,28 @@ export class AdvancedPRReviewAgent {
         }
 
         if (this.shouldFallbackToChatCompletions(error)) {
-          this.useResponsesApi = false;
           const status = (error as { status?: number })?.status;
           const message = (error as Error)?.message || '';
           console.warn(`⚠️ Responses API call failed${status ? ` (${status})` : ''}. Falling back to the legacy chat/completions endpoint.`);
           if (this.verbose && message) {
             console.warn(`   ↳ Original error: ${message}`);
           }
-          return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+
+          try {
+            const chatResult = await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'fallback');
+            this.useResponsesApi = false;
+            return chatResult;
+          } catch (chatError) {
+            if (this.isOperationNotSupportedForChat(chatError)) {
+              const guidance = [
+                'The deployment does not support chat completions.',
+                'Update the Azure OpenAI API version input to a supported Responses API preview (e.g., 2024-08-01-preview) or disable the Responses API option.',
+                'Verify the deployment is configured for the Responses or Chat Completions API.'
+              ].join(' ');
+              throw new Error(`${guidance}\nOriginal error: ${chatError instanceof Error ? chatError.message : String(chatError)}`);
+            }
+            throw chatError;
+          }
         }
 
         console.error("Error calling Azure OpenAI via responses endpoint:", error);
@@ -199,22 +227,24 @@ export class AdvancedPRReviewAgent {
   private async performAzureOpenAIRequest(
     prompt: string,
     mode: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions',
-    attempt: 'primary' | 'fallback'
+    attempt: 'primary' | 'fallback',
+    apiVersionOverride?: string
   ): Promise<string> {
     const isResponsesMode = mode !== 'chatCompletions';
     const deploymentBaseUrl = `${this.azureOpenAIEndpoint}/openai/deployments/${this.deploymentName}`;
+    const apiVersion = apiVersionOverride ?? this.apiVersion;
 
     let url: string;
     switch (mode) {
       case 'responsesDeployment':
-        url = `${deploymentBaseUrl}/responses?api-version=${this.apiVersion}`;
+        url = `${deploymentBaseUrl}/responses?api-version=${apiVersion}`;
         break;
       case 'responsesGlobal':
-        url = `${this.azureOpenAIEndpoint}/openai/v1/responses?api-version=${this.apiVersion}`;
+        url = `${this.azureOpenAIEndpoint}/openai/v1/responses?api-version=${apiVersion}`;
         break;
       case 'chatCompletions':
       default:
-        url = `${deploymentBaseUrl}/chat/completions?api-version=${this.apiVersion}`;
+        url = `${deploymentBaseUrl}/chat/completions?api-version=${apiVersion}`;
         break;
     }
 
@@ -305,6 +335,7 @@ export class AdvancedPRReviewAgent {
         console.log(`  - URL: ${url}`);
         console.log(`  - Deployment: ${this.deploymentName}`);
         console.log(`  - Endpoint Mode: ${mode}${attempt === 'fallback' ? ' (fallback)' : ''}`);
+        console.log(`  - API Version: ${apiVersion}`);
         const messageCount = 'input' in payload ? payload.input.length : payload.messages.length;
         console.log(`  - Messages: ${messageCount}`);
         console.log(`  - Prompt length: ${userMsg.length} chars`);
@@ -335,10 +366,12 @@ export class AdvancedPRReviewAgent {
         status?: number;
         body?: string;
         endpointMode?: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions';
+        apiVersion?: string;
       };
       enrichedError.status = response.status;
       enrichedError.body = errorBody;
       enrichedError.endpointMode = mode;
+      enrichedError.apiVersion = apiVersion;
       throw enrichedError;
     }
 
@@ -363,6 +396,7 @@ export class AdvancedPRReviewAgent {
         console.log('🔍 OpenAI response summary:');
         console.log(`  - HTTP status: ${response.status}`);
         console.log(`  - Endpoint Mode: ${mode}`);
+        console.log(`  - API Version: ${apiVersion}`);
         if (isResponsesMode) {
           const outputCount = Array.isArray(data.output) ? data.output.length : 0;
           console.log(`  - Output items: ${outputCount}`);
@@ -379,6 +413,55 @@ export class AdvancedPRReviewAgent {
     }
 
     return content;
+  }
+
+  private async tryGlobalResponsesEndpoints(prompt: string): Promise<string> {
+    const versionsToTry = this.getResponsesApiVersionFallbacks();
+    let lastError: unknown = null;
+
+    for (let index = 0; index < versionsToTry.length; index++) {
+      const version = versionsToTry[index];
+      const attemptLabel: 'primary' | 'fallback' = index === 0 ? 'fallback' : 'fallback';
+
+      try {
+        if (index > 0) {
+          console.warn(`⚠️ Retrying responses API with fallback api-version "${version}"`);
+        }
+        return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', attemptLabel, version);
+      } catch (error) {
+        lastError = error;
+        if (this.isUnsupportedApiVersionError(error)) {
+          console.warn(`⚠️ API version "${version}" is not supported for the responses endpoint. Trying next fallback version...`);
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    throw new Error('Failed to call Azure OpenAI responses endpoint with any available api-version.');
+  }
+
+  private getResponsesApiVersionFallbacks(): string[] {
+    const configuredVersion = this.apiVersion?.trim();
+    const fallbacks = [
+      '2025-04-01-preview',
+      '2024-12-01-preview',
+      '2024-10-01-preview',
+      '2024-08-01-preview',
+      '2024-02-15-preview'
+    ];
+
+    const merged = [
+      ...(configuredVersion ? [configuredVersion] : []),
+      ...fallbacks
+    ];
+
+    return Array.from(new Set(merged.filter(Boolean)));
   }
 
   private shouldTryGlobalResponsesEndpoint(error: unknown): boolean {
@@ -425,6 +508,20 @@ export class AdvancedPRReviewAgent {
 
     const bodyText = candidate.body || candidate.message || '';
     return /api version not supported/i.test(bodyText) || /unsupported api version/i.test(bodyText);
+  }
+
+  private isOperationNotSupportedForChat(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const candidate = error as { status?: number; body?: string; message?: string; endpointMode?: string };
+    if (candidate.endpointMode !== 'chatCompletions') {
+      return false;
+    }
+
+    const bodyText = candidate.body || candidate.message || '';
+    return /operationnotsupported/i.test(bodyText) || /does not work with the specified model/i.test(bodyText);
   }
 
   private shouldUseMaxCompletionTokens(useResponsesEndpoint: boolean = this.useResponsesApi): boolean {
