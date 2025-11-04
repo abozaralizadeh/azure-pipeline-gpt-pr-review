@@ -235,16 +235,20 @@ export class AdvancedPRReviewAgent {
     const apiVersion = apiVersionOverride ?? this.apiVersion;
 
     let url: string;
+    const shouldAppendVersion = !isResponsesMode && apiVersion;
+
     switch (mode) {
       case 'responsesDeployment':
-        url = `${deploymentBaseUrl}/responses?api-version=${apiVersion}`;
+        url = `${deploymentBaseUrl}/responses`;
         break;
       case 'responsesGlobal':
-        url = `${this.azureOpenAIEndpoint}/openai/v1/responses?api-version=${apiVersion}`;
+        url = `${this.azureOpenAIEndpoint}/openai/v1/responses`;
         break;
       case 'chatCompletions':
       default:
-        url = `${deploymentBaseUrl}/chat/completions?api-version=${apiVersion}`;
+        url = shouldAppendVersion
+          ? `${deploymentBaseUrl}/chat/completions?api-version=${apiVersion}`
+          : `${deploymentBaseUrl}/chat/completions`;
         break;
     }
 
@@ -335,7 +339,7 @@ export class AdvancedPRReviewAgent {
         console.log(`  - URL: ${url}`);
         console.log(`  - Deployment: ${this.deploymentName}`);
         console.log(`  - Endpoint Mode: ${mode}${attempt === 'fallback' ? ' (fallback)' : ''}`);
-        console.log(`  - API Version: ${apiVersion}`);
+        console.log(`  - API Version: ${shouldAppendVersion ? apiVersion : 'default'}`);
         const messageCount = 'input' in payload ? payload.input.length : payload.messages.length;
         console.log(`  - Messages: ${messageCount}`);
         console.log(`  - Prompt length: ${userMsg.length} chars`);
@@ -371,7 +375,7 @@ export class AdvancedPRReviewAgent {
       enrichedError.status = response.status;
       enrichedError.body = errorBody;
       enrichedError.endpointMode = mode;
-      enrichedError.apiVersion = apiVersion;
+      enrichedError.apiVersion = shouldAppendVersion ? apiVersion : 'default';
       throw enrichedError;
     }
 
@@ -396,7 +400,7 @@ export class AdvancedPRReviewAgent {
         console.log('🔍 OpenAI response summary:');
         console.log(`  - HTTP status: ${response.status}`);
         console.log(`  - Endpoint Mode: ${mode}`);
-        console.log(`  - API Version: ${apiVersion}`);
+        console.log(`  - API Version: ${shouldAppendVersion ? apiVersion : 'default'}`);
         if (isResponsesMode) {
           const outputCount = Array.isArray(data.output) ? data.output.length : 0;
           console.log(`  - Output items: ${outputCount}`);
@@ -416,52 +420,7 @@ export class AdvancedPRReviewAgent {
   }
 
   private async tryGlobalResponsesEndpoints(prompt: string): Promise<string> {
-    const versionsToTry = this.getResponsesApiVersionFallbacks();
-    let lastError: unknown = null;
-
-    for (let index = 0; index < versionsToTry.length; index++) {
-      const version = versionsToTry[index];
-      const attemptLabel: 'primary' | 'fallback' = index === 0 ? 'fallback' : 'fallback';
-
-      try {
-        if (index > 0) {
-          console.warn(`⚠️ Retrying responses API with fallback api-version "${version}"`);
-        }
-        return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', attemptLabel, version);
-      } catch (error) {
-        lastError = error;
-        if (this.isUnsupportedApiVersionError(error)) {
-          console.warn(`⚠️ API version "${version}" is not supported for the responses endpoint. Trying next fallback version...`);
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    if (lastError) {
-      throw lastError;
-    }
-
-    throw new Error('Failed to call Azure OpenAI responses endpoint with any available api-version.');
-  }
-
-  private getResponsesApiVersionFallbacks(): string[] {
-    const configuredVersion = this.apiVersion?.trim();
-    const fallbacks = [
-      '2025-04-01-preview',
-      '2024-12-01-preview',
-      '2024-10-01-preview',
-      '2024-08-01-preview',
-      '2024-02-15-preview'
-    ];
-
-    const merged = [
-      ...(configuredVersion ? [configuredVersion] : []),
-      ...fallbacks
-    ];
-
-    return Array.from(new Set(merged.filter(Boolean)));
+    return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', 'fallback');
   }
 
   private shouldTryGlobalResponsesEndpoint(error: unknown): boolean {
