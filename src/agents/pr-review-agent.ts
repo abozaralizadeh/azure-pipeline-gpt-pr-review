@@ -217,11 +217,11 @@ export class AdvancedPRReviewAgent {
     }
 
     type ResponsesPayload = {
+      model: string;
       input: Array<{ role: string; content: Array<{ type: 'input_text'; text: string }> }>;
-      output: { format: { type: string } };
       temperature: number;
       max_output_tokens: number;
-      model?: string;
+      text?: { format: { type: string } };
     };
 
     type ChatPayload = {
@@ -237,6 +237,7 @@ export class AdvancedPRReviewAgent {
     const payload: ResponsesPayload | ChatPayload = isResponsesMode
       ? (() => {
           const responsesPayload: ResponsesPayload = {
+            model: this.deploymentName,
             input: [
               {
                 role: "system",
@@ -257,12 +258,9 @@ export class AdvancedPRReviewAgent {
                 ]
               }
             ],
-            output: { format: { type: "text" } },
             temperature,
             max_output_tokens: 4000
           };
-
-          responsesPayload.model = this.deploymentName;
 
           return responsesPayload;
         })()
