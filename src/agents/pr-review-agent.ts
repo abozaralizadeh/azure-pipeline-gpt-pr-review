@@ -141,58 +141,50 @@ export class AdvancedPRReviewAgent {
 
     const preferResponsesApi = this.useResponsesApi;
 
-    if (preferResponsesApi) {
-      try {
-        return await this.performAzureOpenAIRequest(prompt, 'responsesDeployment', 'primary');
-      } catch (error) {
-        if (this.shouldTryGlobalResponsesEndpoint(error)) {
-          const status = (error as { status?: number })?.status;
-          const message = (error as Error)?.message || '';
-          console.warn(`⚠️ Responses deployment endpoint returned 404${status ? ` (${status})` : ''}. Retrying via the global responses path.`);
-          if (this.verbose && message) {
-            console.warn(`   ↳ Original error: ${message}`);
-          }
-
-          try {
-            return await this.tryGlobalResponsesEndpoints(prompt);
-          } catch (globalError) {
-            if (this.shouldFallbackToChatCompletions(globalError)) {
-              const fallbackStatus = (globalError as { status?: number })?.status;
-              const fallbackMessage = (globalError as { body?: string; message?: string })?.body ?? (globalError as Error)?.message ?? String(globalError);
-              const guidance = [
-                `Responses API request failed${fallbackStatus ? ` (status ${fallbackStatus})` : ''} for deployment "${this.deploymentName}".`,
-                'Verify that the deployment is configured for the Responses API and that the specified `azure_openai_api_version` is supported.',
-                'If the deployment only supports the legacy chat/completions API, disable the "Use Responses API" input in the task configuration.'
-              ].join(' ');
-              throw new Error(`${guidance}\nOriginal error: ${fallbackMessage}`);
-            }
-
-            console.error("Error calling Azure OpenAI via global responses endpoint:", globalError);
-            throw globalError;
-          }
-        }
-
-        if (this.shouldFallbackToChatCompletions(error)) {
-          const status = (error as { status?: number })?.status;
-          const message = (error as { body?: string; message?: string })?.body ?? (error as Error)?.message ?? String(error);
-          const guidance = [
-            `Responses API call failed${status ? ` (status ${status})` : ''} for deployment "${this.deploymentName}".`,
-            'Confirm that the deployment exposes the Responses API endpoint and that the configured `azure_openai_api_version` is valid.',
-            'If the deployment only supports the legacy chat/completions API, disable the "Use Responses API" input in the task configuration.'
-          ].join(' ');
-          throw new Error(`${guidance}\nOriginal error: ${message}`);
-        }
-
-        console.error("Error calling Azure OpenAI via responses endpoint:", error);
-        throw error;
-      }
+    if (!preferResponsesApi) {
+      throw new Error(
+        'Responses API is disabled. Enable the "Use Responses API" input or configure a deployment that supports chat completions.'
+      );
     }
 
     try {
-      return await this.performAzureOpenAIRequest(prompt, 'chatCompletions', 'primary');
+      return await this.performAzureOpenAIRequest(prompt, 'responsesDeployment', 'primary');
     } catch (error) {
-      console.error("Error calling Azure OpenAI:", error);
-      throw error;
+      if (this.shouldTryGlobalResponsesEndpoint(error)) {
+        const status = (error as { status?: number })?.status;
+        const message = (error as Error)?.message || '';
+        console.warn(
+          `⚠️ Responses deployment endpoint returned 404${status ? ` (${status})` : ''}. Retrying via the global responses endpoint.`
+        );
+        if (this.verbose && message) {
+          console.warn(`   ↳ Original error: ${message}`);
+        }
+
+        try {
+          return await this.tryGlobalResponsesEndpoint(prompt);
+        } catch (globalError) {
+          const fallbackStatus = (globalError as { status?: number })?.status;
+          const fallbackMessage =
+            (globalError as { body?: string; message?: string })?.body ??
+            (globalError as Error)?.message ??
+            String(globalError);
+          const guidance = [
+            `Global Responses API request failed${fallbackStatus ? ` (status ${fallbackStatus})` : ''} for deployment "${this.deploymentName}".`,
+            'Verify that the deployment is configured for the Responses API and that the specified `azure_openai_api_version` is supported.',
+            'If the deployment cannot be reached via the global endpoint, ensure the resource name, deployment name, and permissions are correct.'
+          ].join(' ');
+          throw new Error(`${guidance}\nOriginal error: ${fallbackMessage}`);
+        }
+      }
+
+      const status = (error as { status?: number })?.status;
+      const message =
+        (error as { body?: string; message?: string })?.body ?? (error as Error)?.message ?? String(error);
+      const guidance = [
+        `Responses API call failed${status ? ` (status ${status})` : ''} for deployment "${this.deploymentName}".`,
+        'Confirm that the deployment exposes the Responses API endpoint and that the configured `azure_openai_api_version` is valid.'
+      ].join(' ');
+      throw new Error(`${guidance}\nOriginal error: ${message}`);
     }
   }
 
@@ -225,8 +217,8 @@ export class AdvancedPRReviewAgent {
     }
 
     type ResponsesPayload = {
-      input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
-      text: { format: { type: string } };
+      input: Array<{ role: string; content: Array<{ type: 'input_text'; text: string }> }>;
+      output: { format: { type: string } };
       temperature: number;
       max_output_tokens: number;
       model?: string;
@@ -250,7 +242,7 @@ export class AdvancedPRReviewAgent {
                 role: "system",
                 content: [
                   {
-                    type: "text",
+                    type: "input_text",
                     text: "You are an expert code reviewer. You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not use markdown formatting. Return only the JSON object as requested."
                   }
                 ]
@@ -259,13 +251,13 @@ export class AdvancedPRReviewAgent {
                 role: "user",
                 content: [
                   {
-                    type: "text",
+                    type: "input_text",
                     text: prompt
                   }
                 ]
               }
             ],
-            text: { format: { type: "text" } },
+            output: { format: { type: "text" } },
             temperature,
             max_output_tokens: 4000
           };
@@ -389,7 +381,7 @@ export class AdvancedPRReviewAgent {
     return content;
   }
 
-  private async tryGlobalResponsesEndpoints(prompt: string): Promise<string> {
+  private async tryGlobalResponsesEndpoint(prompt: string): Promise<string> {
     return await this.performAzureOpenAIRequest(prompt, 'responsesGlobal', 'fallback');
   }
 
@@ -400,15 +392,6 @@ export class AdvancedPRReviewAgent {
 
     const mode = (error as { endpointMode?: string }).endpointMode;
     return mode === 'responsesDeployment';
-  }
-
-  private shouldFallbackToChatCompletions(error: unknown): boolean {
-    if (!this.isNotFoundError(error) && !this.isUnsupportedApiVersionError(error)) {
-      return false;
-    }
-
-    const mode = (error as { endpointMode?: string }).endpointMode;
-    return mode === 'responsesDeployment' || mode === 'responsesGlobal';
   }
 
   private isNotFoundError(error: unknown): boolean {
