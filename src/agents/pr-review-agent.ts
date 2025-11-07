@@ -684,10 +684,20 @@ Respond with JSON:
     }
 
     const externalContextSection = this.buildExternalContextSection(state.external_context);
+    const expandedContext = this.buildExpandedFileContext(fileLines, diffAnalysis.addedLines);
+    const changedLineSummary = this.summarizeLineNumbers(diffAnalysis.addedLines);
 
     const reviewPrompt = `You are an expert code reviewer. Analyze ONLY the following changed lines from a Pull Request.
 
 File: ${state.current_file}
+
+CHANGED LINE NUMBERS:
+- Added/modified lines: ${changedLineSummary}
+
+FILE CONTEXT (expanded around changed lines and truncated for token safety):
+\`\`\`diff
+${expandedContext || 'No additional context available.'}
+\`\`\`
 
 CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " are nearby context for reference):
 ${changedLinesContext}${externalContextSection}
@@ -1032,6 +1042,124 @@ CRITICAL REQUIREMENTS:
       }).join('\n');
       return `${header}\n\`\`\`diff\n${code}\n\`\`\``;
     }).join('\n\n');
+  }
+
+  private summarizeLineNumbers(lines: number[], maxRanges: number = 50): string {
+    if (!lines || lines.length === 0) {
+      return 'None';
+    }
+
+    const sorted = Array.from(new Set(lines)).sort((a, b) => a - b);
+    const ranges: Array<{ start: number; end: number }> = [];
+
+    let rangeStart = sorted[0];
+    let previous = sorted[0];
+
+    for (let i = 1; i < sorted.length; i++) {
+      const current = sorted[i];
+      if (current === previous + 1) {
+        previous = current;
+        continue;
+      }
+
+      ranges.push({ start: rangeStart, end: previous });
+      rangeStart = current;
+      previous = current;
+    }
+
+    ranges.push({ start: rangeStart, end: previous });
+
+    const formatted = ranges.map(range =>
+      range.start === range.end ? `${range.start}` : `${range.start}-${range.end}`
+    );
+
+    if (formatted.length > maxRanges) {
+      const visible = formatted.slice(0, maxRanges);
+      visible.push(`... (+${formatted.length - maxRanges} more ranges)`);
+      return visible.join(', ');
+    }
+
+    return formatted.join(', ');
+  }
+
+  private buildExpandedFileContext(
+    fileLines: string[],
+    changedLines: number[],
+    contextRadius: number = 40,
+    maxCharacters: number = 60000
+  ): string {
+    if (!fileLines || fileLines.length === 0) {
+      return '';
+    }
+
+    const totalLines = fileLines.length;
+    const sortedChanged = Array.from(new Set(changedLines)).sort((a, b) => a - b);
+    const segments: Array<{ start: number; end: number }> = [];
+
+    if (sortedChanged.length === 0) {
+      segments.push({
+        start: 1,
+        end: Math.min(totalLines, contextRadius * 2)
+      });
+    } else {
+      let currentStart = Math.max(1, sortedChanged[0] - contextRadius);
+      let currentEnd = Math.min(totalLines, sortedChanged[0] + contextRadius);
+
+      for (let i = 1; i < sortedChanged.length; i++) {
+        const line = sortedChanged[i];
+        const start = Math.max(1, line - contextRadius);
+        const end = Math.min(totalLines, line + contextRadius);
+
+        if (start <= currentEnd + 1) {
+          currentEnd = Math.max(currentEnd, end);
+        } else {
+          segments.push({ start: currentStart, end: currentEnd });
+          currentStart = start;
+          currentEnd = end;
+        }
+      }
+
+      segments.push({ start: currentStart, end: currentEnd });
+    }
+
+    const changedSet = new Set(sortedChanged);
+    let context = '';
+    let truncated = false;
+
+    segments.forEach((segment, index) => {
+      if (truncated) {
+        return;
+      }
+
+      const header = `Segment ${index + 1}: lines ${segment.start}-${segment.end}\n`;
+      if (context.length + header.length > maxCharacters) {
+        truncated = true;
+        return;
+      }
+
+      context += header;
+
+      for (let lineNumber = segment.start; lineNumber <= segment.end; lineNumber++) {
+        const prefix = changedSet.has(lineNumber) ? '+' : ' ';
+        const lineText = fileLines[lineNumber - 1] ?? '';
+        const entry = `${prefix}${lineNumber.toString().padStart(5, ' ')} | ${lineText}\n`;
+
+        if (context.length + entry.length > maxCharacters) {
+          truncated = true;
+          break;
+        }
+
+        context += entry;
+      }
+
+      context += '\n';
+    });
+
+    if (truncated) {
+      context += '... (context truncated to stay within token limits)\n';
+    }
+
+    return context.trimEnd();
   }
 
   private combineIssuesForComment(issues: any[], lineContent: string, lineNumber: number): string {
@@ -1449,10 +1577,20 @@ CRITICAL REQUIREMENTS:
     }
 
     const securityExternalContext = this.buildExternalContextSection(state.external_context);
+    const expandedContext = this.buildExpandedFileContext(securityFileLines, diffAnalysis.addedLines);
+    const changedLineSummary = this.summarizeLineNumbers(diffAnalysis.addedLines);
 
     const securityPrompt = `Perform a security analysis of the modified code lines below.
 
 File: ${state.current_file}
+
+CHANGED LINE NUMBERS:
+- Added/modified lines: ${changedLineSummary}
+
+FILE CONTEXT (expanded around changed lines and truncated for token safety):
+\`\`\`diff
+${expandedContext || 'No additional context available.'}
+\`\`\`
 
 CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " provide nearby context):
 ${changedLinesContext}${securityExternalContext}
