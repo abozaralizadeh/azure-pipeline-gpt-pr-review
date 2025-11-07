@@ -354,8 +354,13 @@ export class ReviewOrchestrator {
     const hasRecentSummary = this.hasRecentSummaryComment(existingComments);
     if (!hasRecentSummary) {
       const summaryComment = this.formatSummaryComment(finalSummary);
-      await this.azureDevOpsService.addGeneralComment(summaryComment);
-      console.log(`✅ Posted new summary comment`);
+      const autoClose = finalSummary.overall_assessment === 'approve';
+      const threadId = await this.azureDevOpsService.addGeneralComment(summaryComment, { autoClose });
+      if (autoClose && threadId) {
+        console.log(`✅ Posted new summary comment and auto-closed thread ${threadId}`);
+      } else {
+        console.log(`✅ Posted new summary comment${threadId ? ` (thread ${threadId})` : ''}`);
+      }
     } else {
       console.log(`📝 Recent summary comment exists, skipping duplicate`);
     }

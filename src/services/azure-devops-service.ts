@@ -1736,7 +1736,7 @@ export class AzureDevOpsService {
     return this.iterationContextCache;
   }
 
-  public async addComment(comment: PRComment): Promise<void> {
+  public async addComment(comment: PRComment): Promise<PRThread> {
     const url = this.getApiUrl('/threads');
 
     const body: any = {
@@ -1772,7 +1772,9 @@ export class AzureDevOpsService {
       throw new Error(`Failed to add comment: ${response.status} ${response.statusText}`);
     }
 
-    console.log(`Comment added successfully for ${comment.threadContext?.filePath || 'general'}`);
+    const thread = (await response.json()) as PRThread;
+    console.log(`Comment added successfully for ${comment.threadContext?.filePath || 'general'} (thread ${thread.id})`);
+    return thread;
   }
 
   public async addInlineComment(
@@ -1822,11 +1824,23 @@ export class AzureDevOpsService {
     });
   }
 
-  public async addGeneralComment(comment: string): Promise<void> {
-    await this.addComment({
+  public async addGeneralComment(comment: string, options: { autoClose?: boolean } = {}): Promise<number | null> {
+    const thread = await this.addComment({
       content: comment,
       commentType: 1
     });
+    const threadId = thread?.id ?? null;
+
+    if (options.autoClose && threadId) {
+      try {
+        await this.updateCommentThreadStatus(threadId, 4);
+        console.log(`🔒 Auto-closed summary comment thread ${threadId}`);
+      } catch (err) {
+        console.log(`⚠️ Failed to auto-close summary comment thread ${threadId}:`, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    return threadId;
   }
 
   public async getExistingComments(): Promise<PRThread[]> {
@@ -1842,6 +1856,21 @@ export class AzureDevOpsService {
 
     const threads = await response.json();
     return threads.value || [];
+  }
+
+  public async updateCommentThreadStatus(threadId: number, status: number): Promise<void> {
+    const url = this.getApiUrl(`/threads/${threadId}`);
+    const response = await this.safeFetch(url, {
+      method: 'PATCH',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ status })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to update comment thread ${threadId} status to ${status}: ${response.status} ${response.statusText}`);
+    }
+
+    console.log(`🛠️ Updated thread ${threadId} status to ${status}`);
   }
 
   public async deleteComment(threadId: number, commentId: number): Promise<void> {
