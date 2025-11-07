@@ -339,20 +339,105 @@ export class AdvancedPRReviewAgent {
       throw enrichedError;
     }
 
-    const data = await response.json() as any;
+    const rawBody = await response.text();
+    const trimmedBody = (rawBody || '').trim();
+    const requestId =
+      response.headers.get('apim-request-id') ??
+      response.headers.get('x-request-id') ??
+      response.headers.get('request-id') ??
+      undefined;
+    const bodyPreview = trimmedBody.substring(0, 500);
+
+    if (!trimmedBody) {
+      if (this.verbose) {
+        console.error(
+          `❌ Empty response body from Azure OpenAI (mode=${mode}, status=${response.status}, requestId=${
+            requestId ?? 'n/a'
+          }).`
+        );
+      }
+      const emptyBodyError = new Error(
+        `Azure OpenAI API returned HTTP 200 but no response body for mode "${mode}". Request ID: ${
+          requestId ?? 'unknown'
+        }.`
+      ) as Error & {
+        status?: number;
+        body?: string;
+        endpointMode?: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions';
+        apiVersion?: string;
+      };
+      emptyBodyError.status = response.status;
+      emptyBodyError.body = '';
+      emptyBodyError.endpointMode = mode;
+      emptyBodyError.apiVersion = shouldAppendVersion ? apiVersion : 'default';
+      throw emptyBodyError;
+    }
+
+    let data: any;
+    try {
+      data = JSON.parse(trimmedBody);
+    } catch (parseErr) {
+      const parseError = new Error(
+        `Failed to parse Azure OpenAI response JSON for mode "${mode}": ${
+          parseErr instanceof Error ? parseErr.message : String(parseErr)
+        }`
+      ) as Error & {
+        status?: number;
+        body?: string;
+        endpointMode?: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions';
+        apiVersion?: string;
+      };
+      parseError.status = response.status;
+      parseError.body = trimmedBody.substring(0, 2000);
+      parseError.endpointMode = mode;
+      parseError.apiVersion = shouldAppendVersion ? apiVersion : 'default';
+      if (this.verbose) {
+        console.error(
+          `❌ Failed to parse Azure OpenAI response JSON (mode=${mode}, status=${response.status}, requestId=${
+            requestId ?? 'n/a'
+          }).`
+        );
+        console.error(`   ↳ Body preview (first 500 chars): ${bodyPreview}`);
+        console.error(`   ↳ Parse error: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+      }
+      (parseError as { requestId?: string }).requestId = requestId;
+      throw parseError;
+    }
+
     this.llmCalls++;
     let content = '';
 
     if (isResponsesMode) {
-      content =
-        data.output_text ||
-        (Array.isArray(data.output)
-          ? (data.output
-              .flatMap((item: any) => item.content || [])
-              .find((part: any) => part.type === 'text')?.text || '')
-          : '');
+      content = this.extractResponsesText(data);
     } else {
       content = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
+    }
+
+    if (!content) {
+      if (this.verbose) {
+        console.error(
+          `❌ Azure OpenAI response contained no textual content (mode=${mode}, status=${response.status}, requestId=${
+            requestId ?? 'n/a'
+          }).`
+        );
+        console.error(`   ↳ Raw body preview (first 500 chars): ${bodyPreview}`);
+      }
+      const missingContentError = new Error(
+        `Azure OpenAI API returned HTTP 200 but no textual content for mode "${mode}". Request ID: ${
+          requestId ?? 'unknown'
+        }.`
+      ) as Error & {
+        status?: number;
+        body?: string;
+        endpointMode?: 'responsesDeployment' | 'responsesGlobal' | 'chatCompletions';
+        apiVersion?: string;
+      };
+      missingContentError.status = response.status;
+      missingContentError.body = trimmedBody.substring(0, 2000);
+      missingContentError.endpointMode = mode;
+      missingContentError.apiVersion = shouldAppendVersion ? apiVersion : 'default';
+      (missingContentError as { requestId?: string }).requestId = requestId;
+      throw missingContentError;
     }
 
     try {
@@ -466,6 +551,93 @@ export class AdvancedPRReviewAgent {
     }
 
     return year === 2024 && month >= 7;
+  }
+
+  private extractResponsesText(data: any): string {
+    if (!data || typeof data !== 'object') {
+      return '';
+    }
+
+    const chunks: string[] = [];
+    const pushChunk = (value: unknown) => {
+      if (Array.isArray(value)) {
+        value.forEach(pushChunk);
+        return;
+      }
+
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed) {
+          chunks.push(trimmed);
+        }
+        return;
+      }
+    };
+
+    const walkContent = (node: any): void => {
+      if (!node) {
+        return;
+      }
+
+      if (Array.isArray(node)) {
+        node.forEach(walkContent);
+        return;
+      }
+
+      if (typeof node === 'string') {
+        pushChunk(node);
+        return;
+      }
+
+      if (typeof node !== 'object') {
+        return;
+      }
+
+      if (typeof node.text === 'string') {
+        pushChunk(node.text);
+      }
+
+      if (typeof node.output_text === 'string' || Array.isArray(node.output_text)) {
+        pushChunk(node.output_text);
+      }
+
+      if (node.type === 'message' && node.content) {
+        walkContent(node.content);
+      } else if (node.type === 'output_text' && typeof node.text === 'string') {
+        pushChunk(node.text);
+      }
+
+      if (node.message && node.message.content) {
+        walkContent(node.message.content);
+      }
+
+      if (node.content) {
+        walkContent(node.content);
+      }
+
+      if (node.delta && node.delta.content) {
+        walkContent(node.delta.content);
+      }
+    };
+
+    if (typeof data.output_text === 'string' || Array.isArray(data.output_text)) {
+      pushChunk(data.output_text);
+    }
+
+    if (data.response) {
+      walkContent(data.response);
+    }
+
+    if (Array.isArray(data.output)) {
+      data.output.forEach((item: any) => walkContent(item));
+    }
+
+    if (chunks.length === 0 && Array.isArray(data.choices)) {
+      data.choices.forEach((choice: any) => walkContent(choice));
+    }
+
+    const uniqueChunks = Array.from(new Set(chunks));
+    return uniqueChunks.join('\n').trim();
   }
 
   private safeJsonParse(jsonString: string, fallback: any): any {
