@@ -142,7 +142,7 @@ export class AdvancedPRReviewAgent {
     const preferResponsesApi = this.useResponsesApi;
 
     if (!preferResponsesApi) {
-      throw new Error(
+      console.warn(
         'Responses API is disabled. Enable the "Use Responses API" input or configure a deployment that supports chat completions.'
       );
     }
@@ -863,6 +863,11 @@ IMPORTANT INSTRUCTIONS:
 5. PRIORITIZE obvious syntax errors and broken code over minor style issues
 6. If no issues are found in the changed lines, return empty issues array
 
+LANGUAGE AWARENESS:
+- Determine the most likely programming or markup language for the modified code before raising issues.
+- Apply that language's syntax and structural rules when checking for errors (e.g., Python indentation, JSON commas, TypeScript typings).
+- If the syntax is invalid for the detected language, report it as a bug with high severity and explain the violation.
+
 Review the CHANGED code for:
 1. SYNTAX ERRORS and broken code (HIGHEST PRIORITY)
 2. Logic errors and correctness
@@ -907,7 +912,8 @@ CRITICAL REQUIREMENTS:
 4. The code_snippet must match the actual code on that line (whitespace differences are OK)
 5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
 6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
-7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)`;
+7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)
+8. The summary MUST begin with "Detected language: <language guess>."`;
 
     try {
       const response = await this.callAzureOpenAI(reviewPrompt);
@@ -915,7 +921,7 @@ CRITICAL REQUIREMENTS:
         issues: [],
         fixed_issues: [],
         overall_quality: "acceptable",
-        summary: "Review completed with fallback parsing"
+        summary: "Detected language: unknown. Review completed with fallback parsing"
       });
       
       // Add review comments to state with STRICT validation for changed lines only
@@ -1601,6 +1607,11 @@ ${changedLinesContext}${securityExternalContext}
 
 IMPORTANT: ONLY analyze lines prefixed with "+". Context lines are for reference and must not be flagged unless they are also changed.
 
+LANGUAGE AWARENESS:
+- Identify the most likely programming or markup language for the modified lines before reviewing them.
+- Apply that language's syntax and structural rules when checking for security issues (e.g., validate SQL syntax, JSON structure, or shell quoting).
+- If the syntax is invalid for the detected language, flag it as a high-severity issue and explain why it is unsafe or non-compilable.
+
 CRITICAL RULES - READ CAREFULLY:
 1. Evaluate ONLY the modified lines (prefixed with "+")
 2. Provide precise line numbers from the modified file
@@ -1623,6 +1634,7 @@ CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, n
 
 Respond with JSON:
 {
+  "detected_language": "C#",
   "security_issues": [
     {
       "vulnerability_type": "SQL Injection",
@@ -1644,11 +1656,13 @@ CRITICAL REQUIREMENTS:
 4. The code_snippet must match the actual code on that line (whitespace differences are OK)
 5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
 6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
-7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)`;
+7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)
+8. Include a top-level \"detected_language\" field describing the language you analyzed.`;
 
     try {
       const response = await this.callAzureOpenAI(securityPrompt);
       const securityAnalysis = this.safeJsonParse(response, {
+        detected_language: "unknown",
         security_issues: [],
         overall_security_score: "B"
       });
