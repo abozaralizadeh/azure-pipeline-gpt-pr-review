@@ -43,6 +43,20 @@ export const PRReviewState = z.object({
 
 export type PRReviewStateType = z.infer<typeof PRReviewState>;
 
+type DiffPromptOptions = {
+  roleIntroduction: string;
+  fileName?: string | null;
+  changedLineSummary: string;
+  fileDiff: string;
+  changedLinesContext?: string;
+  expandedContext?: string;
+  externalContextSection?: string;
+  instructionsSection: string;
+  jsonResponseReminder: string;
+  responseSchema: string;
+  criticalRequirements: string;
+};
+
 // Define the review analysis schema
 const ReviewAnalysisSchema = z.object({
   has_issues: z.boolean(),
@@ -830,40 +844,22 @@ Respond with JSON:
     const externalContextSection = this.buildExternalContextSection(state.external_context);
     const expandedContext = this.buildExpandedFileContext(fileLines, diffAnalysis.addedLines);
     const changedLineSummary = this.summarizeLineNumbers(diffAnalysis.addedLines);
-    const diffSnippet = this.formatDiffForPrompt(state.file_diff || '');
-    const formattedDiffSection = `\`\`\`diff
-${diffSnippet}
-\`\`\``;
-    const lineContextSection = changedLinesContext
-      ? `NEW FILE CONTEXT WITH LINE NUMBERS (+ = modified lines):
-${changedLinesContext}
-`
-      : '';
-    const expandedContextSection = expandedContext
-      ? `ADDITIONAL CONTEXT AROUND CHANGED LINES:
-\`\`\`diff
-${expandedContext}
-\`\`\`
-`
-      : '';
 
-    const reviewPrompt = `You are an expert code reviewer. Review the diff below and describe any issues in the modified lines of this pull request. Respond with valid JSON only.
-
-File: ${state.current_file}
-Changed line numbers (new file): ${changedLineSummary}
-
-Unified diff ("-" = before, "+" = after):
-${formattedDiffSection}
-
-${lineContextSection}${expandedContextSection}${externalContextSection}REVIEW INSTRUCTIONS:
+    const reviewPrompt = this.buildDiffPrompt({
+      roleIntroduction: `You are an expert code reviewer. Review the diff below and describe any issues in the modified lines of this pull request. Respond with valid JSON only.`,
+      fileName: state.current_file,
+      changedLineSummary,
+      fileDiff: state.file_diff || '',
+      changedLinesContext,
+      expandedContext,
+      externalContextSection,
+      instructionsSection: `REVIEW INSTRUCTIONS:
 1. Inspect only the lines that begin with "+" in the diff/context—those are the new or updated lines.
 2. Use the provided new file line numbers when setting each issue.line_number.
 3. Include a code_snippet for every issue that matches the referenced line exactly (whitespace differences are fine).
-4. If there are no problems in the changed lines, return an empty issues array.
-
-CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
-
-Use the following JSON schema for your response:
+4. If there are no problems in the changed lines, return an empty issues array.`,
+      jsonResponseReminder: `CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.`,
+      responseSchema: `Use the following JSON schema for your response:
 {
   "issues": [
     {
@@ -886,15 +882,14 @@ Use the following JSON schema for your response:
   ],
   "overall_quality": "needs_improvement",
   "summary": "Brief summary of the review"
-}
-
-CRITICAL REQUIREMENTS:
-1. For each issue, provide the exact line_number from the modified file (or null if it cannot be determined).
+}`,
+      criticalRequirements: `1. For each issue, provide the exact line_number from the modified file (or null if it cannot be determined).
 2. Include the precise code_snippet for the reported line so the author can verify the problem.
 3. Do not fabricate line numbers—set line_number to null and explain why if the mapping is ambiguous.
 4. Focus exclusively on the changed lines in this PR; ignore untouched code.
-5. Be language aware and explain syntax violations when relevant.
-6. The summary MUST begin with "Detected language: <language guess>."`;
+5. Be language aware and explain syntax-driven security risks when relevant.
+6. The summary MUST begin with "Detected language: <language guess>."`
+    });
 
     try {
       const response = await this.callAzureOpenAI(reviewPrompt);
@@ -1115,6 +1110,60 @@ CRITICAL REQUIREMENTS:
       }).join('\n');
       return `${header}\n\`\`\`diff\n${code}\n\`\`\``;
     }).join('\n\n');
+  }
+
+  private buildDiffPrompt(options: DiffPromptOptions): string {
+    const diffSnippet = this.formatDiffForPrompt(options.fileDiff);
+    const formattedDiffSection = `\`\`\`diff\n${diffSnippet}\n\`\`\``;
+
+    const lineContextTrimmed = options.changedLinesContext?.trimEnd();
+    const lineContextSection = lineContextTrimmed
+      ? `NEW FILE CONTEXT WITH LINE NUMBERS (+ = modified lines):\n${lineContextTrimmed}`
+      : '';
+
+    const expandedContextTrimmed = options.expandedContext?.trimEnd();
+    const expandedContextSection = expandedContextTrimmed
+      ? `ADDITIONAL CONTEXT AROUND CHANGED LINES:\n\`\`\`diff\n${expandedContextTrimmed}\n\`\`\``
+      : '';
+
+    const externalContextSection = options.externalContextSection ?? '';
+
+    const contextSections = [lineContextSection, expandedContextSection, externalContextSection]
+      .map(section => section ? section.trim() : '')
+      .filter(section => section.length > 0);
+
+    const parts: string[] = [];
+
+    parts.push(options.roleIntroduction.trim());
+    parts.push('');
+    parts.push(`File: ${options.fileName ?? 'unknown'}`);
+    parts.push(`Changed line numbers (new file): ${options.changedLineSummary}`);
+    parts.push('');
+    parts.push('Unified diff ("-" = before, "+" = after):');
+    parts.push(formattedDiffSection);
+    parts.push('');
+
+    if (contextSections.length > 0) {
+      contextSections.forEach(section => {
+        parts.push(section);
+        parts.push('');
+      });
+    }
+
+    parts.push(options.instructionsSection.trim());
+    parts.push('');
+    parts.push(options.jsonResponseReminder.trim());
+    parts.push('');
+    parts.push(options.responseSchema.trim());
+    parts.push('');
+    parts.push('CRITICAL REQUIREMENTS:');
+    parts.push(options.criticalRequirements.trim());
+
+    while (parts[parts.length - 1] === '') {
+      parts.pop();
+    }
+
+    return parts.join('\n');
   }
 
   private formatDiffForPrompt(diff: string, maxLines: number = 300): string {
@@ -1599,49 +1648,35 @@ CRITICAL REQUIREMENTS:
     const expandedContext = this.buildExpandedFileContext(securityFileLines, diffAnalysis.addedLines);
     const changedLineSummary = this.summarizeLineNumbers(diffAnalysis.addedLines);
 
-    const securityPrompt = `Perform a security analysis of the modified code lines below.
+    const securityPrompt = this.buildDiffPrompt({
+      roleIntroduction: `You are a security-focused code reviewer. Examine the diff below and report any vulnerabilities in the modified lines. Respond with valid JSON only.`,
+      fileName: state.current_file,
+      changedLineSummary,
+      fileDiff: state.file_diff || '',
+      changedLinesContext,
+      expandedContext,
+      externalContextSection: securityExternalContext,
+      instructionsSection: `SECURITY REVIEW INSTRUCTIONS:
+1. Inspect only the lines that begin with "+"—those are the newly introduced or updated lines.
+2. Use the provided new file line numbers when setting each issue.line_number.
+3. Recommend clear remediations for every finding.
+4. Return an empty security_issues array if no problems are present.
 
-File: ${state.current_file}
-
-CHANGED LINE NUMBERS:
-- Added/modified lines: ${changedLineSummary}
-
-FILE CONTEXT (expanded around changed lines and truncated for token safety):
-\`\`\`diff
-${expandedContext || 'No additional context available.'}
-\`\`\`
-
-CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " provide nearby context):
-${changedLinesContext}${securityExternalContext}
-
-IMPORTANT: ONLY analyze lines prefixed with "+". Context lines are for reference and must not be flagged unless they are also changed.
+PRIMARY SECURITY CHECKS:
+- Hardcoded secrets or credentials
+- Logging of sensitive information
+- Input validation or sanitization gaps
+- Injection vulnerabilities (SQL, XSS, command, etc.)
+- Authentication / authorization mistakes
+- Insecure cryptographic or dependency usage
+- Prompt-injection risks when handling LLM input/output
 
 LANGUAGE AWARENESS:
-- Identify the most likely programming or markup language for the modified lines before reviewing them.
-- Apply that language's syntax and structural rules when checking for security issues (e.g., validate SQL syntax, JSON structure, or shell quoting).
-- If the syntax is invalid for the detected language, flag it as a high-severity issue and explain why it is unsafe or non-compilable.
-
-CRITICAL RULES - READ CAREFULLY:
-1. Evaluate ONLY the modified lines (prefixed with "+")
-2. Provide precise line numbers from the modified file
-3. Recommend actionable remediations for each finding
-4. If no security vulnerabilities exist in the modified lines, return an empty security_issues array
-
-Assess the changed code for:
-1. Hardcoded secrets and credentials
-2. Logging of sensitive information
-3. Input validation or sanitization gaps
-4. SQL injection vulnerabilities
-5. XSS vulnerabilities
-6. Insecure authentication or authorization checks
-7. Use of insecure dependencies or APIs
-8. Prompt injection risks when interacting with LLMs
-
-For each security issue, provide the EXACT line number from the changed lines list where the vulnerability occurs.
-
-CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
-
-Respond with JSON:
+- Identify the most likely language before evaluating the code.
+- Apply that language's syntax and idioms when judging security implications.
+- If the syntax is invalid or obviously unsafe, flag it with high severity and explain the risk.`,
+      jsonResponseReminder: `CRITICAL: Respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.`,
+      responseSchema: `Return JSON with this shape:
 {
   "detected_language": "C#",
   "security_issues": [
@@ -1656,17 +1691,14 @@ Respond with JSON:
     }
   ],
   "overall_security_score": "C"
-}
-
-CRITICAL REQUIREMENTS:
-1. For each security issue, you MUST provide the EXACT line_number from the modified file
-2. You MUST include the code_snippet that contains the vulnerability - this should be the EXACT code from that line
-3. The line_number must correspond to the actual line in the modified file where the vulnerability occurs
-4. The code_snippet must match the actual code on that line (whitespace differences are OK)
-5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
-6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
-7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)
-8. Include a top-level \"detected_language\" field describing the language you analyzed.`;
+}`,
+      criticalRequirements: `1. For each security issue, provide the exact line_number from the modified file (or null if you cannot determine it).
+2. Include the code_snippet for the vulnerable line so the author can verify the problem.
+3. Do not fabricate line numbers—set line_number to null and explain why if mapping is ambiguous.
+4. Focus exclusively on the changed lines in this PR; ignore untouched code.
+5. Be language aware and explain any syntax-driven security risks.
+6. Include a top-level "detected_language" field describing the language you analyzed.`
+    });
 
     try {
       const response = await this.callAzureOpenAI(securityPrompt);
