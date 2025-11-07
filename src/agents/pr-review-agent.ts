@@ -139,6 +139,13 @@ export class AdvancedPRReviewAgent {
       throw new Error("Maximum LLM calls reached");
     }
 
+    if (this.verbose) {
+      console.log('🧠 Sending prompt to Azure OpenAI:');
+      console.log('────────────────────────────────────────────────────────');
+      console.log(prompt);
+      console.log('────────────────────────────────────────────────────────');
+    }
+
     const preferResponsesApi = this.useResponsesApi;
 
     if (!preferResponsesApi) {
@@ -823,60 +830,36 @@ Respond with JSON:
     const externalContextSection = this.buildExternalContextSection(state.external_context);
     const expandedContext = this.buildExpandedFileContext(fileLines, diffAnalysis.addedLines);
     const changedLineSummary = this.summarizeLineNumbers(diffAnalysis.addedLines);
+    const diffSnippet = this.formatDiffForPrompt(state.file_diff || '');
+    const formattedDiffSection = `\`\`\`diff
+${diffSnippet}
+\`\`\``;
+    const lineContextSection = changedLinesContext
+      ? `NEW FILE CONTEXT WITH LINE NUMBERS (+ = modified lines):
+${changedLinesContext}
+`
+      : '';
+    const expandedContextSection = expandedContext
+      ? `ADDITIONAL CONTEXT AROUND CHANGED LINES:
+\`\`\`diff
+${expandedContext}
+\`\`\`
+`
+      : '';
 
-    const reviewPrompt = `You are an expert code reviewer. Analyze ONLY the following changed lines from a Pull Request.
+    const reviewPrompt = `You are an expert code reviewer. Review the diff below and describe any issues in the modified lines of this pull request. Respond with valid JSON only.
 
 File: ${state.current_file}
+Changed line numbers (new file): ${changedLineSummary}
 
-CHANGED LINE NUMBERS:
-- Added/modified lines: ${changedLineSummary}
+Unified diff ("-" = before, "+" = after):
+${formattedDiffSection}
 
-FILE CONTEXT (expanded around changed lines and truncated for token safety):
-\`\`\`diff
-${expandedContext || 'No additional context available.'}
-\`\`\`
-
-CHANGED LINE BLOCKS (lines prefixed with "+" were modified in this PR; lines with " " are nearby context for reference):
-${changedLinesContext}${externalContextSection}
-
-IMPORTANT: Only comment on lines prefixed with "+". Context lines are for understanding only.
-
-CRITICAL RULES - READ CAREFULLY:
-1. YOU CAN ONLY COMMENT ON THE LINES LISTED ABOVE - these are the ONLY lines that were changed
-2. DO NOT comment on any other lines in the file, even if they have issues
-3. If the changed lines don't have any issues, return an empty issues array
-4. Focus ONLY on problems in the actual changes made
-5. Use the EXACT line numbers provided above
-
-CRITICAL: Look for these OBVIOUS problems in the CHANGED LINES ONLY:
-1. SYNTAX ERRORS - broken code, missing brackets, invalid syntax
-2. GIBBERISH TEXT - random characters, nonsensical code  
-3. BROKEN STRUCTURE - incomplete objects, missing properties
-4. TYPO ERRORS - obvious typos in code
-5. LOGIC ERRORS - code that doesn't make sense
-
-IMPORTANT INSTRUCTIONS:
-1. ONLY comment on code that was actually CHANGED in this PR (the lines shown above)
-2. Use the EXACT line numbers from the changed lines list
-3. Focus on the specific changes made, not the entire file
-4. Provide relevant suggestions that match the actual code being changed
-5. PRIORITIZE obvious syntax errors and broken code over minor style issues
-6. If no issues are found in the changed lines, return empty issues array
-
-LANGUAGE AWARENESS:
-- Determine the most likely programming or markup language for the modified code before raising issues.
-- Apply that language's syntax and structural rules when checking for errors (e.g., Python indentation, JSON commas, TypeScript typings).
-- If the syntax is invalid for the detected language, report it as a bug with high severity and explain the violation.
-
-Review the CHANGED code for:
-1. SYNTAX ERRORS and broken code (HIGHEST PRIORITY)
-2. Logic errors and correctness
-3. Code quality and readability
-4. Performance issues
-5. Security vulnerabilities
-6. Maintainability concerns
-
-For each issue, provide the EXACT line number from the changed lines list where the issue occurs.
+${lineContextSection}${expandedContextSection}${externalContextSection}REVIEW INSTRUCTIONS:
+1. Inspect only the lines that begin with "+" in the diff/context—those are the new or updated lines.
+2. Use the provided new file line numbers when setting each issue.line_number.
+3. Include a code_snippet for every issue that matches the referenced line exactly (whitespace differences are fine).
+4. If there are no problems in the changed lines, return an empty issues array.
 
 CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, no text before or after the JSON. Just the JSON object.
 
@@ -906,14 +889,12 @@ Use the following JSON schema for your response:
 }
 
 CRITICAL REQUIREMENTS:
-1. For each issue, you MUST provide the EXACT line_number from the modified file
-2. You MUST include the code_snippet that contains the issue - this should be the EXACT code from that line
-3. The line_number must correspond to the actual line in the modified file where the issue occurs
-4. The code_snippet must match the actual code on that line (whitespace differences are OK)
-5. If you cannot find a specific line, do NOT make up a line number - set line_number to null
-6. Focus on the ACTUAL CHANGED CODE - only comment on lines that were modified in this PR
-7. Be language-agnostic - this works for any programming language (Python, Java, C#, JavaScript, etc.)
-8. The summary MUST begin with "Detected language: <language guess>."`;
+1. For each issue, provide the exact line_number from the modified file (or null if it cannot be determined).
+2. Include the precise code_snippet for the reported line so the author can verify the problem.
+3. Do not fabricate line numbers—set line_number to null and explain why if the mapping is ambiguous.
+4. Focus exclusively on the changed lines in this PR; ignore untouched code.
+5. Be language aware and explain syntax violations when relevant.
+6. The summary MUST begin with "Detected language: <language guess>."`;
 
     try {
       const response = await this.callAzureOpenAI(reviewPrompt);
@@ -1134,6 +1115,34 @@ CRITICAL REQUIREMENTS:
       }).join('\n');
       return `${header}\n\`\`\`diff\n${code}\n\`\`\``;
     }).join('\n\n');
+  }
+
+  private formatDiffForPrompt(diff: string, maxLines: number = 300): string {
+    if (!diff) {
+      return 'Diff unavailable.';
+    }
+
+    const trimmed = diff.trim();
+    if (!trimmed) {
+      return 'Diff unavailable.';
+    }
+
+    const lines = trimmed.split('\n');
+    if (lines.length <= maxLines) {
+      return trimmed;
+    }
+
+    const keepStart = Math.max(1, Math.floor(maxLines * 0.6));
+    const keepEnd = Math.max(1, maxLines - keepStart);
+    if (keepStart + keepEnd >= lines.length) {
+      return trimmed;
+    }
+
+    const head = lines.slice(0, keepStart);
+    const tail = lines.slice(-keepEnd);
+    const omitted = lines.length - (keepStart + keepEnd);
+    const omissionNotice = `... (diff truncated, ${omitted} omitted line${omitted === 1 ? '' : 's'})`;
+    return `${head.join('\n')}\n${omissionNotice}\n${tail.join('\n')}`;
   }
 
   private summarizeLineNumbers(lines: number[], maxRanges: number = 50): string {
