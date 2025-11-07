@@ -1,11 +1,11 @@
 # Advanced Azure DevOps PR Reviewer
 
-An intelligent, AI-powered Pull Request reviewer for Azure DevOps that uses Azure OpenAI and LangGraph React agent to provide precise, contextual code reviews.
+An intelligent, AI-powered Pull Request reviewer for Azure DevOps that uses Azure OpenAI to provide precise, contextual code reviews.
 
 ## 🚀 Features
 
 ### 🤖 Advanced AI-Powered Review
-- **LangGraph React Agent**: Uses sophisticated reasoning chains to analyze code systematically
+- **Advanced Reasoning Pipelines**: Uses structured multi-step prompts to analyze code systematically
 - **Azure OpenAI Integration**: Leverages state-of-the-art language models for accurate code analysis
 - **Context-Aware Review**: Understands PR context and only writes reviews when necessary
 - **Maximum 100 LLM Calls**: Efficient resource usage with configurable limits
@@ -31,7 +31,7 @@ An intelligent, AI-powered Pull Request reviewer for Azure DevOps that uses Azur
 
 ## 🏗️ Architecture
 
-The extension uses a sophisticated LangGraph-based architecture:
+The extension orchestrates a structured review pipeline:
 
 ```
 PR Context → Context Analysis → File Review → Security Scan → Code Suggestions → Final Assessment
@@ -43,7 +43,7 @@ PR Context → Context Analysis → File Review → Security Scan → Code Sugge
 ### Core Components
 
 1. **Review Orchestrator**: Coordinates the entire review process
-2. **LangGraph Agent**: Manages the reasoning flow and LLM interactions
+2. **LLM Orchestrator**: Manages the reasoning flow and LLM interactions
 3. **Azure DevOps Service**: Handles all Azure DevOps API interactions
 4. **Review State Management**: Tracks review progress and maintains context
 
@@ -51,7 +51,7 @@ PR Context → Context Analysis → File Review → Security Scan → Code Sugge
 
 ### Azure OpenAI Setup
 1. **Azure OpenAI Resource**: Create an Azure OpenAI resource in your Azure subscription
-2. **Model Deployment**: Deploy a GPT-4 or GPT-3.5-turbo model
+2. **Model Deployment**: Deploy a GPT-5-codex or an older model
 3. **API Access**: Ensure your Azure DevOps pipeline has access to the Azure OpenAI endpoint
 4. **Preview Models**: For GPT‑4.1/GPT‑5 deployments, use the latest preview API version (e.g., `2024-08-01-preview`) and enable the Responses API input.
 
@@ -94,10 +94,13 @@ Add the task to your Azure DevOps pipeline YAML:
 
 ```yaml
 - task: GENAIADVANCEDPRREVIEWER@2
+  continueOnError: true
   inputs:
-    azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
-    azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'
-    azure_openai_deployment_name: 'gpt-4'
+    azure_openai_endpoint: '$(azure_openai_endpoint)'
+    azure_openai_api_key: '$(azure_openai_api_key)'
+    azure_openai_deployment_name: '$(azure_openai_deployment_name)'
+    azure_openai_api_version: '$(azure_openai_api_version)'
+    azure_openai_use_responses_api: true
     max_llm_calls: '100'
     review_threshold: '0.7'
     enable_code_suggestions: true
@@ -110,7 +113,11 @@ Set up pipeline variables in Azure DevOps:
 
 ```yaml
 variables:
-  AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+  azure_openai_endpoint: https://yourendpoint.openai.azure.com
+  azure_openai_deployment_name: gpt-5-codex
+  azure_openai_api_version: 2025-04-01-preview
+  # store the key as a secret variable
+  azure_openai_api_key: $(azure_openai_api_key)
 ```
 
 ## ⚙️ Configuration Options
@@ -125,8 +132,8 @@ variables:
 | `enable_code_suggestions` | boolean | ❌ | true | Enable AI code suggestions |
 | `enable_security_scanning` | boolean | ❌ | true | Enable security vulnerability scanning |
 | `support_self_signed_certificate` | boolean | ❌ | false | Support self-signed certificates |
-| `azure_openai_api_version` | string | ❌ | 2024-02-15-preview | Azure OpenAI API version (use newer previews for GPT-4.1 / GPT-5) |
-| `azure_openai_use_responses_api` | boolean | ❌ | false | Call the modern Responses API (required for GPT-4.1 and GPT-5 deployments) |
+| `azure_openai_api_version` | string | ❌ | 2025-04-01-preview | Azure OpenAI API version (preview required for GPT‑5 deployments) |
+| `azure_openai_use_responses_api` | boolean | ❌ | false | Call the modern Responses API (required for GPT‑4.1 and GPT‑5 deployments) |
 | `mcp_servers` | multi-line string | ❌ | - | JSON array describing MCP servers that enrich each review with additional context |
 
 ## 🔌 MCP Server Integration
@@ -140,7 +147,7 @@ Model Context Protocol (MCP) servers let you plug repository-specific knowledge 
   inputs:
     azure_openai_endpoint: 'https://your-resource.openai.azure.com/'
     azure_openai_api_key: '$(AZURE_OPENAI_API_KEY)'
-    azure_openai_deployment_name: 'gpt-4'
+    azure_openai_deployment_name: 'gpt-5-codex'
     mcp_servers: |
       [
         {
@@ -341,7 +348,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - **Azure OpenAI Team**: For providing the underlying AI capabilities
-- **LangGraph Community**: For the excellent graph-based reasoning framework
+- **Open Source Community**: For inspiration and feedback on advanced review workflows
 - **Azure DevOps Team**: For the robust platform and APIs
 - **Open Source Contributors**: For the various libraries and tools used
 

@@ -19,7 +19,7 @@ jest.mock('azure-pipelines-task-lib/task', () => ({
     const inputs: { [key: string]: string } = {
       'azure_openai_endpoint': 'https://test.openai.azure.com/',
       'azure_openai_api_key': 'test-api-key',
-      'azure_openai_deployment_name': 'gpt-4',
+      'azure_openai_deployment_name': 'gpt-5-codex',
       'max_llm_calls': '100',
       'review_threshold': '0.7',
       'enable_code_suggestions': 'true',
@@ -64,4 +64,4 @@ global.console = {
 process.env.NODE_ENV = 'test';
 process.env.AZURE_OPENAI_ENDPOINT = 'https://test.openai.azure.com/';
 process.env.AZURE_OPENAI_API_KEY = 'test-api-key';
-process.env.AZURE_OPENAI_DEPLOYMENT_NAME = 'gpt-4';
+process.env.AZURE_OPENAI_DEPLOYMENT_NAME = 'gpt-5-codex';

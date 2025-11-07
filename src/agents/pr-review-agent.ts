@@ -637,41 +637,6 @@ Respond with JSON:
       }
     }
     
-    // First, check for obvious syntax errors in the changed content
-    const syntaxErrors = this.detectSyntaxErrors(diffAnalysis.changedContent, diffAnalysis.addedLines, state.current_file || 'unknown', fileLines);
-    if (syntaxErrors.length > 0) {
-      console.log(`🚨 Detected ${syntaxErrors.length} syntax errors in changed content`);
-      const groupedSyntax = new Map<number, Array<{lineNumber: number, message: string, suggestion: string}>>();
-
-      for (const error of syntaxErrors) {
-        if (!groupedSyntax.has(error.lineNumber)) {
-          groupedSyntax.set(error.lineNumber, []);
-        }
-        groupedSyntax.get(error.lineNumber)!.push(error);
-      }
-
-      for (const [lineNumber, issues] of groupedSyntax.entries()) {
-        const formattedIssues = issues.map(issue => ({
-          type: 'bug',
-          severity: 'critical',
-          description: issue.message,
-          suggestion: issue.suggestion,
-          confidence: 1.0
-        }));
-
-        const commentBody = this.combineIssuesForComment(formattedIssues, fileLines[lineNumber - 1] || '', lineNumber);
-
-        state.review_comments.push({
-          file: state.current_file || "unknown",
-          line: lineNumber,
-          comment: commentBody,
-          type: "bug",
-          confidence: 1.0,
-          is_new_issue: true
-        });
-      }
-    }
-    
     const changedLineBlocks = this.buildChangedLineBlocks(diffAnalysis.addedLines, fileLines);
     const changedLinesContext = this.renderBlocksForPrompt(changedLineBlocks);
 
@@ -938,57 +903,6 @@ CRITICAL REQUIREMENTS:
     return { addedLines, removedLines, modifiedLines, changedContent };
   }
 
-  private detectSyntaxErrors(changedContent: string[], addedLines: number[], fileName: string, fileLines: string[]): Array<{lineNumber: number, message: string, suggestion: string}> {
-    const errors: Array<{lineNumber: number, message: string, suggestion: string}> = [];
-    
-    if (!changedContent || changedContent.length === 0 || !addedLines || addedLines.length === 0) {
-      return errors;
-    }
-    
-    console.log(`🔍 Detecting syntax errors in ${changedContent.length} changed lines`);
-    
-    for (let i = 0; i < changedContent.length; i++) {
-      const line = changedContent[i];
-      const lineNumber = addedLines[i] || (i + 1); // Use actual line number from diff
-      
-      // Check for obvious gibberish or random characters
-      if (this.isGibberish(line)) {
-        errors.push({
-          lineNumber: lineNumber,
-          message: `Line contains gibberish or random characters: "${line.substring(0, 50)}..."`,
-          suggestion: "Replace with valid code or remove if not needed"
-        });
-        console.log(`🚨 Gibberish detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
-        continue;
-      }
-      
-      // Check for obvious syntax errors
-      if (this.hasObviousSyntaxError(line)) {
-        errors.push({
-          lineNumber: lineNumber,
-          message: `Obvious syntax error: "${line}"`,
-          suggestion: "Fix the syntax error or remove the line"
-        });
-        console.log(`🚨 Syntax error detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
-        continue;
-      }
-      
-      // Check for incomplete code structures
-      if (this.isIncompleteStructure(line, lineNumber, fileLines)) {
-        errors.push({
-          lineNumber: lineNumber,
-          message: `Incomplete code structure: "${line}"`,
-          suggestion: "Complete the code structure or remove if not needed"
-        });
-        console.log(`🚨 Incomplete structure detected at line ${lineNumber}: ${line.substring(0, 30)}...`);
-        continue;
-      }
-    }
-    
-    console.log(`✅ Syntax error detection complete: ${errors.length} errors found`);
-    return errors;
-  }
-
   private buildChangedLineBlocks(addedLines: number[], fileLines: string[], contextWindow: number = 2): Array<{ start: number; end: number; lines: Array<{ number: number; text: string; changed: boolean }> }> {
     if (!addedLines || addedLines.length === 0) {
       return [];
@@ -1177,88 +1091,6 @@ CRITICAL REQUIREMENTS:
 
     const snippet = `\`\`\`diff\n+ ${lineNumber}: ${lineContent}\n\`\`\``;
     return `${parts.join('\n\n')}\n\n${snippet}`;
-  }
-
-  private isGibberish(line: string): boolean {
-    const trimmed = line.trim();
-    
-    if (!trimmed) return false;
-    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) return false;
-
-    // If the line contains common code punctuation, treat it as legitimate code.
-    if (/[.;(){}=]/.test(trimmed)) return false;
-
-    const alphaOnly = trimmed.replace(/[_\d]/g, '');
-    const longRandomLetters = /^[a-z]{12,}$/i.test(alphaOnly);
-    const alphaNumericMix = /[a-z]{5,}\d{3,}/i.test(trimmed.replace(/_/g, ''));
-    const spacedRandomWords = /^[a-z]{4,}\s+[a-z]{4,}\s+[a-z0-9]{4,}$/i.test(trimmed);
-
-    return longRandomLetters || alphaNumericMix || spacedRandomWords;
-  }
-  
-  private hasObviousSyntaxError(line: string): boolean {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-
-    const hasInvalidNegation = trimmed.includes('?!');
-    const hasDoubleQuestion = /\?\?/.test(trimmed);
-    const usesInvalidTypeKeyword = /^\s*int\s+[A-Za-z_]/.test(trimmed);
-
-    return hasInvalidNegation || hasDoubleQuestion || usesInvalidTypeKeyword;
-  }
-  
-  private isIncompleteStructure(line: string, lineNumber: number, fileLines: string[]): boolean {
-    const trimmed = line.trim();
-    
-    if (!trimmed) {
-      return false;
-    }
-
-    if (trimmed.endsWith('{') && !trimmed.includes('}')) {
-      return !this.hasMatchingClosingBrace(lineNumber, fileLines);
-    }
-
-    if (/^if\s*\([^)]*\)\s*$/.test(trimmed)) {
-      const nextLineIndex = this.findNextNonEmptyLineIndex(lineNumber, fileLines);
-      if (nextLineIndex > 0) {
-        const nextLine = fileLines[nextLineIndex - 1].trim();
-        if (nextLine.startsWith('{') || nextLine.startsWith('return') || nextLine.startsWith('throw')) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    return false;
-  }
-
-  private hasMatchingClosingBrace(lineNumber: number, fileLines: string[]): boolean {
-    let depth = 0;
-    let opened = false;
-    for (let i = lineNumber - 1; i < fileLines.length; i++) {
-      const line = fileLines[i];
-      for (const char of line) {
-        if (char === '{') {
-          depth++;
-          opened = true;
-        } else if (char === '}' && opened) {
-          depth--;
-        }
-      }
-      if (opened && depth <= 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private findNextNonEmptyLineIndex(currentLine: number, fileLines: string[]): number {
-    for (let i = currentLine; i < fileLines.length; i++) {
-      if ((fileLines[i] || '').trim().length > 0) {
-        return i + 1;
-      }
-    }
-    return -1;
   }
 
   private findBestLineNumber(issue: any, diffAnalysis: any, fileContent: string): number {

@@ -12,7 +12,7 @@ describe('ReviewOrchestrator', () => {
       mockHttpsAgent,
       'https://test.openai.azure.com/',
       'test-api-key',
-      'gpt-4',
+      'gpt-5-codex',
       100,
       0.7,
       true,

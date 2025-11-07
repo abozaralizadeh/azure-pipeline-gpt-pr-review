@@ -12,7 +12,7 @@
   "demands": [],
   "version": {
     "Major": "2",
-    "Minor": "66",
+    "Minor": "68",
     "Patch": "0"
   },
   "minimumAgentVersion": "1.95.0",
@@ -38,9 +38,9 @@
       "name": "azure_openai_api_version",
       "type": "string",
       "label": "Azure OpenAI API Version",
-      "defaultValue": "2024-02-15-preview",
+      "defaultValue": "2025-04-01-preview",
       "required": false,
-      "helpMarkDown": "API version to use when calling Azure OpenAI (e.g., 2024-08-01-preview for GPT-5)"
+      "helpMarkDown": "API version to use when calling Azure OpenAI (e.g., 2025-04-01-preview for GPT-5)"
     },
     {
       "name": "azure_openai_use_responses_api",
@@ -62,7 +62,7 @@
       "name": "azure_openai_deployment_name",
       "type": "string",
       "label": "Azure OpenAI Deployment Name",
-      "defaultValue": "gpt-4",
+      "defaultValue": "gpt-5-codex",
       "required": true,
       "helpMarkDown": "Name of the Azure OpenAI model deployment to use"
     },
